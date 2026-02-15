@@ -11,9 +11,12 @@ import (
 func main() {
 	database.InitDB()
 
+	// Create a new ServeMux for our application routes
+	mux := http.NewServeMux()
+
 	// Public routes
-	http.HandleFunc("/signup", handlers.Signup)
-	http.HandleFunc("/signin", handlers.Signin)
+	mux.HandleFunc("/api/signup", handlers.Signup)
+	mux.HandleFunc("/api/login", handlers.Signin) // Frontend calls /login
 
 	// Protected routes
 	protectedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -25,8 +28,11 @@ func main() {
 		w.Write([]byte("Hello, " + email))
 	})
 
-	http.Handle("/protected", middleware.AuthMiddleware(protectedHandler))
+	mux.Handle("/api/protected", middleware.AuthMiddleware(protectedHandler))
+
+	// Apply CORS middleware to the entire mux
+	handler := middleware.CorsMiddleware(mux)
 
 	log.Println("Server started on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(":8080", handler))
 }
