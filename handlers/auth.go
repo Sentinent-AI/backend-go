@@ -1,89 +1,88 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
-	"strings"
+	"sentinent-backend/database"
+	"sentinent-backend/models"
+	"time"
 
-	"github.com/Sentinent-AI/backend-go/models"
-	"github.com/Sentinent-AI/backend-go/utils"
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
-type RegisterRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
+var JwtKey = []byte("secret_key_for_sentinent") // In prod, use env var
 
-type LoginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
-
-func Register(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req RegisterRequest
-	err := json.NewDecoder(r.Body).Decode(&req)
+func Signup(w http.ResponseWriter, r *http.Request) {
+	var user models.User
+	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Basic validation
-	if req.Email == "" || req.Password == "" {
-		http.Error(w, "Email and password are required", http.StatusBadRequest)
-		return
-	}
-
-	user, err := models.CreateUser(req.Email, req.Password)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			http.Error(w, "Email already exists", http.StatusConflict)
-			return
-		}
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_, err = database.DB.Exec("INSERT INTO users (email, password) VALUES (?, ?)", user.Email, string(hashedPassword))
+	if err != nil {
+		http.Error(w, "Email already exists", http.StatusConflict)
 		return
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(user)
 }
 
-func Login(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req LoginRequest
-	err := json.NewDecoder(r.Body).Decode(&req)
+func Signin(w http.ResponseWriter, r *http.Request) {
+	var creds models.User
+	err := json.NewDecoder(r.Body).Decode(&creds)
 	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	user, err := models.GetUserByEmail(req.Email)
+	var storedUser models.User
+	err = database.DB.QueryRow("SELECT id, email, password FROM users WHERE email = ?", creds.Email).Scan(&storedUser.ID, &storedUser.Email, &storedUser.Password)
+	if err == sql.ErrNoRows {
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	} else if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	err = bcrypt.CompareHashAndPassword([]byte(storedUser.Password), []byte(creds.Password))
 	if err != nil {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
-	if !models.CheckPasswordHash(req.Password, user.PasswordHash) {
-		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
-		return
+	expirationTime := time.Now().Add(24 * time.Hour)
+	claims := &models.Claims{
+		Email: creds.Email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+		},
 	}
 
-	token, err := utils.GenerateToken(user.Email, user.ID)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(JwtKey)
 	if err != nil {
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"token": token,
+	http.SetCookie(w, &http.Cookie{
+		Name:    "token",
+		Value:   tokenString,
+		Expires: expirationTime,
 	})
+
+	// Also return JSON for non-browser clients
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"token": tokenString})
 }

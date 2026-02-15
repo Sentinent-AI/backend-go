@@ -3,22 +3,29 @@ package main
 import (
 	"log"
 	"net/http"
-
-	"github.com/Sentinent-AI/backend-go/db"
-	"github.com/Sentinent-AI/backend-go/handlers"
-	"github.com/Sentinent-AI/backend-go/middleware"
+	"sentinent-backend/database"
+	"sentinent-backend/handlers"
+	"sentinent-backend/middleware"
 )
 
 func main() {
-	db.InitDB()
+	database.InitDB()
 
-	http.HandleFunc("/api/signup", handlers.Register)
-	http.HandleFunc("/api/login", handlers.Login)
+	// Public routes
+	http.HandleFunc("/signup", handlers.Signup)
+	http.HandleFunc("/signin", handlers.Signin)
 
-	// Example protected route
-	http.Handle("/api/profile", middleware.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Protected Profile Data"))
-	})))
+	// Protected routes
+	protectedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		email, ok := r.Context().Value(middleware.UserEmailKey).(string)
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Write([]byte("Hello, " + email))
+	})
+
+	http.Handle("/protected", middleware.AuthMiddleware(protectedHandler))
 
 	log.Println("Server started on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
