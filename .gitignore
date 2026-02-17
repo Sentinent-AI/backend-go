@@ -31,3 +31,6 @@ go.work.sum
 # .idea/
 # .vscode/
 sentinent-backend
+
+# db
+sentinent.db
