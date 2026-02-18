@@ -3,12 +3,28 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 	"sentinent-backend/database"
 	"sentinent-backend/handlers"
 	"sentinent-backend/middleware"
+	"strings"
 )
 
 func main() {
+	jwtSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET is required")
+	}
+	handlers.JwtKey = []byte(jwtSecret)
+
+	corsAllowedOrigins := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	if corsAllowedOrigins == "" {
+		log.Fatal("CORS_ALLOWED_ORIGINS is required (comma-separated origins)")
+	}
+	if err := middleware.SetAllowedOrigins(strings.Split(corsAllowedOrigins, ",")); err != nil {
+		log.Fatalf("invalid CORS_ALLOWED_ORIGINS: %v", err)
+	}
+
 	database.InitDB()
 
 	// Create a new ServeMux for our application routes
