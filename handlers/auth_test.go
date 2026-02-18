@@ -31,6 +31,22 @@ func setupTestDB() {
 	if err != nil {
 		panic(err)
 	}
+
+	createWorkspaceTable := `
+	CREATE TABLE IF NOT EXISTS workspaces (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		owner_id INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (owner_id) REFERENCES users(id)
+	);`
+
+	_, err = database.DB.Exec(createWorkspaceTable)
+	if err != nil {
+		panic(err)
+	}
+
+	JwtKey = []byte("test-jwt-secret")
 }
 
 func TestSignup(t *testing.T) {
@@ -67,6 +83,7 @@ func TestSignup(t *testing.T) {
 func TestSignin(t *testing.T) {
 	setupTestDB()
 	defer database.DB.Close()
+	t.Setenv("APP_ENV", "development")
 
 	// Create user first
 	Signup(httptest.NewRecorder(), httptest.NewRequest("POST", "/signup", bytes.NewBuffer([]byte(`{"email":"test@example.com","password":"password123"}`))))
@@ -88,14 +105,54 @@ func TestSignin(t *testing.T) {
 	}
 
 	// Check for token in cookie
-	foundCookie := false
+	var tokenCookie *http.Cookie
 	for _, cookie := range rr.Result().Cookies() {
 		if cookie.Name == "token" {
-			foundCookie = true
+			tokenCookie = cookie
 			break
 		}
 	}
-	if !foundCookie {
+	if tokenCookie == nil {
 		t.Errorf("token cookie not found")
+	}
+	if !tokenCookie.HttpOnly {
+		t.Errorf("expected token cookie to be HttpOnly")
+	}
+	if tokenCookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("expected token cookie to use SameSite=Lax")
+	}
+	if tokenCookie.Secure {
+		t.Errorf("expected token cookie Secure=false in development mode")
+	}
+}
+
+func TestSigninCookieSecureInProduction(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+	t.Setenv("APP_ENV", "production")
+
+	Signup(httptest.NewRecorder(), httptest.NewRequest("POST", "/signup", bytes.NewBuffer([]byte(`{"email":"test@example.com","password":"password123"}`))))
+
+	body, _ := json.Marshal(models.User{
+		Email:    "test@example.com",
+		Password: "password123",
+	})
+
+	req, _ := http.NewRequest("POST", "/signin", bytes.NewBuffer(body))
+	rr := httptest.NewRecorder()
+	Signin(rr, req)
+
+	var tokenCookie *http.Cookie
+	for _, cookie := range rr.Result().Cookies() {
+		if cookie.Name == "token" {
+			tokenCookie = cookie
+			break
+		}
+	}
+	if tokenCookie == nil {
+		t.Fatalf("token cookie not found")
+	}
+	if !tokenCookie.Secure {
+		t.Errorf("expected token cookie Secure=true in production mode")
 	}
 }

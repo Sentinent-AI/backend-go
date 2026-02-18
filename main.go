@@ -3,12 +3,28 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 	"sentinent-backend/database"
 	"sentinent-backend/handlers"
 	"sentinent-backend/middleware"
+	"strings"
 )
 
 func main() {
+	jwtSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET is required")
+	}
+	handlers.JwtKey = []byte(jwtSecret)
+
+	corsAllowedOrigins := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	if corsAllowedOrigins == "" {
+		log.Fatal("CORS_ALLOWED_ORIGINS is required (comma-separated origins)")
+	}
+	if err := middleware.SetAllowedOrigins(strings.Split(corsAllowedOrigins, ",")); err != nil {
+		log.Fatalf("invalid CORS_ALLOWED_ORIGINS: %v", err)
+	}
+
 	database.InitDB()
 
 	// Create a new ServeMux for our application routes
@@ -29,6 +45,16 @@ func main() {
 	})
 
 	mux.Handle("/api/protected", middleware.AuthMiddleware(protectedHandler))
+
+	workspaceHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		email, ok := r.Context().Value(middleware.UserEmailKey).(string)
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handlers.CreateWorkspace(w, r, email)
+	})
+	mux.Handle("/api/workspaces", middleware.AuthMiddleware(workspaceHandler))
 
 	// Apply CORS middleware to the entire mux
 	handler := middleware.CorsMiddleware(mux)
