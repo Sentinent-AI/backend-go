@@ -4,15 +4,17 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"os"
 	"sentinent-backend/database"
 	"sentinent-backend/models"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
-var JwtKey = []byte("secret_key_for_sentinent") // In prod, use env var
+var JwtKey []byte
 
 func Signup(w http.ResponseWriter, r *http.Request) {
 	var user models.User
@@ -70,6 +72,10 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	if len(JwtKey) == 0 {
+		http.Error(w, "Server configuration error", http.StatusInternalServerError)
+		return
+	}
 	tokenString, err := token.SignedString(JwtKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -77,12 +83,25 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:    "token",
-		Value:   tokenString,
-		Expires: expirationTime,
+		Name:     "token",
+		Value:    tokenString,
+		Expires:  expirationTime,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isProductionEnv(),
 	})
 
 	// Also return JSON for non-browser clients
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": tokenString})
+}
+
+func isProductionEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV"))) {
+	case "production", "prod":
+		return true
+	default:
+		return false
+	}
 }
