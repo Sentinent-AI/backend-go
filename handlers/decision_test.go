@@ -29,15 +29,45 @@ func insertDecisionTestUser(t *testing.T, email string) int {
 	return int(id)
 }
 
-func insertDecision(t *testing.T, ownerID int, title, description, status, createdAt, updatedAt string) int64 {
+func insertWorkspace(t *testing.T, ownerID int, name string) int64 {
 	t.Helper()
 
 	result, err := database.DB.Exec(
-		`INSERT INTO decisions (title, description, status, owner_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"INSERT INTO workspaces (name, owner_id) VALUES (?, ?)",
+		name,
+		ownerID,
+	)
+	if err != nil {
+		t.Fatalf("failed to insert workspace: %v", err)
+	}
+
+	workspaceID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("failed to get workspace id: %v", err)
+	}
+
+	_, err = database.DB.Exec(
+		"INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'owner')",
+		workspaceID,
+		ownerID,
+	)
+	if err != nil {
+		t.Fatalf("failed to insert workspace membership: %v", err)
+	}
+
+	return workspaceID
+}
+
+func insertDecision(t *testing.T, workspaceID int64, ownerID int, title, description, status, createdAt, updatedAt string) int64 {
+	t.Helper()
+
+	result, err := database.DB.Exec(
+		`INSERT INTO decisions (title, description, status, workspace_id, owner_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		title,
 		description,
 		status,
+		workspaceID,
 		ownerID,
 		createdAt,
 		updatedAt,
@@ -59,9 +89,11 @@ func TestUpdateDecisionSuccess(t *testing.T) {
 
 	ownerEmail := "owner@example.com"
 	ownerID := insertDecisionTestUser(t, ownerEmail)
+	workspaceID := insertWorkspace(t, ownerID, "Engineering")
 	oldUpdatedAt := "2000-01-01 00:00:00"
 	decisionID := insertDecision(
 		t,
+		workspaceID,
 		ownerID,
 		"Initial Title",
 		"Initial Description",
@@ -114,8 +146,10 @@ func TestUpdateDecisionRequiresAtLeastOneField(t *testing.T) {
 
 	ownerEmail := "owner@example.com"
 	ownerID := insertDecisionTestUser(t, ownerEmail)
+	workspaceID := insertWorkspace(t, ownerID, "Engineering")
 	decisionID := insertDecision(
 		t,
+		workspaceID,
 		ownerID,
 		"Initial Title",
 		"Initial Description",
@@ -140,9 +174,11 @@ func TestUpdateDecisionNotOwner(t *testing.T) {
 	defer database.DB.Close()
 
 	ownerID := insertDecisionTestUser(t, "owner@example.com")
+	workspaceID := insertWorkspace(t, ownerID, "Engineering")
 	insertDecisionTestUser(t, "another@example.com")
 	decisionID := insertDecision(
 		t,
+		workspaceID,
 		ownerID,
 		"Initial Title",
 		"Initial Description",

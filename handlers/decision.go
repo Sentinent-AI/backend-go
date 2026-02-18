@@ -107,7 +107,7 @@ func UpdateDecision(w http.ResponseWriter, r *http.Request, userEmail string) {
 
 	var decision models.Decision
 	err = database.DB.QueryRow(
-		`SELECT id, title, description, status, owner_id, created_at, updated_at
+		`SELECT id, title, description, status, workspace_id, owner_id, created_at, updated_at
 		 FROM decisions
 		 WHERE id = ?`,
 		decisionID,
@@ -116,6 +116,7 @@ func UpdateDecision(w http.ResponseWriter, r *http.Request, userEmail string) {
 		&decision.Title,
 		&decision.Description,
 		&decision.Status,
+		&decision.WorkspaceID,
 		&decision.OwnerID,
 		&decision.CreatedAt,
 		&decision.UpdatedAt,

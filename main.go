@@ -56,6 +56,26 @@ func main() {
 	})
 	mux.Handle("/api/decisions/", middleware.AuthMiddleware(decisionHandler))
 
+	workspaceHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		email, ok := r.Context().Value(middleware.UserEmailKey).(string)
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handlers.CreateWorkspace(w, r, email)
+	})
+	mux.Handle("/api/workspaces", middleware.AuthMiddleware(workspaceHandler))
+
+	workspaceSubresourceHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		email, ok := r.Context().Value(middleware.UserEmailKey).(string)
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handlers.WorkspaceSubresourceHandler(w, r, email)
+	})
+	mux.Handle("/api/workspaces/", middleware.AuthMiddleware(workspaceSubresourceHandler))
+
 	// Apply CORS middleware to the entire mux
 	handler := middleware.CorsMiddleware(mux)
 

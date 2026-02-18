@@ -33,14 +33,34 @@ func setupTestDB() {
 	}
 
 	createDecisionsTable := `
+	CREATE TABLE IF NOT EXISTS workspaces (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		owner_id INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (owner_id) REFERENCES users(id)
+	);
+
+	CREATE TABLE IF NOT EXISTS workspace_members (
+		workspace_id INTEGER NOT NULL,
+		user_id INTEGER NOT NULL,
+		role TEXT NOT NULL DEFAULT 'member',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (workspace_id, user_id),
+		FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+		FOREIGN KEY (user_id) REFERENCES users(id)
+	);
+
 	CREATE TABLE IF NOT EXISTS decisions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		title TEXT NOT NULL,
 		description TEXT NOT NULL,
 		status TEXT NOT NULL,
+		workspace_id INTEGER NOT NULL,
 		owner_id INTEGER NOT NULL,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
 		FOREIGN KEY (owner_id) REFERENCES users(id)
 	);`
 
