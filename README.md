@@ -19,19 +19,3 @@ $env:CORS_ALLOWED_ORIGINS = "http://localhost:4200"
 $env:APP_ENV = "development"
 go run .
 ```
-
-## Postman Testing
-
-Import these files in Postman:
-
-- `postman/Sentinent-Backend.postman_collection.json`
-- `postman/Sentinent-Local.postman_environment.json`
-
-Collection includes:
-
-- `GET /api/health`
-- `POST /api/signup`
-- `POST /api/login` (stores JWT into `authToken`)
-- `GET /api/protected` (uses `Authorization: Bearer {{authToken}}`)
-
-Before running requests, start the server with required env vars and select the `Sentinent Local` environment.

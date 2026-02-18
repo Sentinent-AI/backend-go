@@ -31,7 +31,6 @@ func main() {
 	mux := http.NewServeMux()
 
 	// Public routes
-	mux.HandleFunc("/api/health", handlers.Health)
 	mux.HandleFunc("/api/signup", handlers.Signup)
 	mux.HandleFunc("/api/login", handlers.Signin) // Frontend calls /login
 
