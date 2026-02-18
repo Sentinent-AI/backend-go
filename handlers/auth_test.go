@@ -32,6 +32,20 @@ func setupTestDB() {
 		panic(err)
 	}
 
+	createWorkspaceTable := `
+	CREATE TABLE IF NOT EXISTS workspaces (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		owner_id INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (owner_id) REFERENCES users(id)
+	);`
+
+	_, err = database.DB.Exec(createWorkspaceTable)
+	if err != nil {
+		panic(err)
+	}
+
 	JwtKey = []byte("test-jwt-secret")
 }
 
