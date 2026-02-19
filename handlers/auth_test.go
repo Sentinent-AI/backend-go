@@ -142,3 +142,45 @@ func TestSigninCookieSecureInProduction(t *testing.T) {
 		t.Errorf("expected token cookie Secure=true in production mode")
 	}
 }
+
+func TestSignupInvalidEmail(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+
+	user := models.User{
+		Email:    "invalid-email",
+		Password: "password123",
+	}
+	body, _ := json.Marshal(user)
+
+	req, _ := http.NewRequest("POST", "/signup", bytes.NewBuffer(body))
+	rr := httptest.NewRecorder()
+
+	Signup(rr, req)
+
+	if status := rr.Code; status != http.StatusBadRequest {
+		t.Errorf("handler returned wrong status code: got %v want %v",
+			status, http.StatusBadRequest)
+	}
+}
+
+func TestSigninInvalidEmail(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+
+	user := models.User{
+		Email:    "invalid-email",
+		Password: "password123",
+	}
+	body, _ := json.Marshal(user)
+
+	req, _ := http.NewRequest("POST", "/signin", bytes.NewBuffer(body))
+	rr := httptest.NewRecorder()
+
+	Signin(rr, req)
+
+	if status := rr.Code; status != http.StatusBadRequest {
+		t.Errorf("handler returned wrong status code: got %v want %v",
+			status, http.StatusBadRequest)
+	}
+}
