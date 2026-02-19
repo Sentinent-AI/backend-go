@@ -7,6 +7,7 @@ import (
 	"os"
 	"sentinent-backend/database"
 	"sentinent-backend/models"
+	"sentinent-backend/utils"
 	"strings"
 	"time"
 
@@ -21,6 +22,11 @@ func Signup(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if !utils.IsEmailValid(user.Email) {
+		http.Error(w, "Invalid email format", http.StatusBadRequest)
 		return
 	}
 
@@ -44,6 +50,11 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&creds)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if !utils.IsEmailValid(creds.Email) {
+		http.Error(w, "Invalid email format", http.StatusBadRequest)
 		return
 	}
 
