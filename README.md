@@ -19,3 +19,14 @@ $env:CORS_ALLOWED_ORIGINS = "http://localhost:4200"
 $env:APP_ENV = "development"
 go run .
 ```
+
+## Decision API
+
+Update a decision (authenticated):
+
+```bash
+curl -X PUT http://localhost:8080/api/decisions/1 \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Q1 Launch Plan","description":"Refined timeline and risks","status":"approved"}'
+```

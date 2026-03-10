@@ -46,6 +46,16 @@ func main() {
 
 	mux.Handle("/api/protected", middleware.AuthMiddleware(protectedHandler))
 
+	decisionHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		email, ok := r.Context().Value(middleware.UserEmailKey).(string)
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handlers.UpdateDecision(w, r, email)
+	})
+	mux.Handle("/api/decisions/", middleware.AuthMiddleware(decisionHandler))
+
 	// Apply CORS middleware to the entire mux
 	handler := middleware.CorsMiddleware(mux)
 

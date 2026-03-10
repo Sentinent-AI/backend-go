@@ -32,6 +32,23 @@ func setupTestDB() {
 		panic(err)
 	}
 
+	createDecisionsTable := `
+	CREATE TABLE IF NOT EXISTS decisions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		title TEXT NOT NULL,
+		description TEXT NOT NULL,
+		status TEXT NOT NULL,
+		owner_id INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (owner_id) REFERENCES users(id)
+	);`
+
+	_, err = database.DB.Exec(createDecisionsTable)
+	if err != nil {
+		panic(err)
+	}
+
 	JwtKey = []byte("test-jwt-secret")
 }
 
