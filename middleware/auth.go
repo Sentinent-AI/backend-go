@@ -3,8 +3,8 @@ package middleware
 import (
 	"context"
 	"net/http"
-	"sentinent-backend/handlers"
 	"sentinent-backend/models"
+	"sentinent-backend/utils"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -42,7 +42,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		claims := &models.Claims{}
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-			return handlers.JwtKey, nil
+			return utils.JwtKey, nil
 		})
 
 		if err != nil {

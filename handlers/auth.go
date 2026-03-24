@@ -15,7 +15,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var JwtKey []byte
+var JwtKey []byte // Deprecated: use utils.JwtKey instead
 
 func Signup(w http.ResponseWriter, r *http.Request) {
 	var user models.User
@@ -83,11 +83,11 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	if len(JwtKey) == 0 {
+	if len(utils.JwtKey) == 0 {
 		http.Error(w, "Server configuration error", http.StatusInternalServerError)
 		return
 	}
-	tokenString, err := token.SignedString(JwtKey)
+	tokenString, err := token.SignedString(utils.JwtKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
