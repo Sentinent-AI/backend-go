@@ -3,7 +3,7 @@ package middleware
 import (
 	"context"
 	"net/http"
-	"sentinent-backend/handlers"
+	"sentinent-backend/database"
 	"sentinent-backend/models"
 	"strings"
 
@@ -13,6 +13,7 @@ import (
 type contextKey string
 
 const UserEmailKey contextKey = "userEmail"
+const UserIDKey contextKey = "userId"
 
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +43,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		claims := &models.Claims{}
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-			return handlers.JwtKey, nil
+			return models.JwtKey, nil
 		})
 
 		if err != nil {
@@ -59,7 +60,32 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// If UserID is not in claims, look it up from database
+		userID := claims.UserID
+		if userID == 0 {
+			var id int
+			err := database.DB.QueryRow("SELECT id FROM users WHERE email = ?", claims.Email).Scan(&id)
+			if err != nil {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			userID = id
+		}
+
 		ctx := context.WithValue(r.Context(), UserEmailKey, claims.Email)
+		ctx = context.WithValue(ctx, UserIDKey, userID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// GetUserID extracts the user ID from the context
+func GetUserID(ctx context.Context) (int, bool) {
+	userID, ok := ctx.Value(UserIDKey).(int)
+	return userID, ok
+}
+
+// GetUserEmail extracts the user email from the context
+func GetUserEmail(ctx context.Context) (string, bool) {
+	email, ok := ctx.Value(UserEmailKey).(string)
+	return email, ok
 }

@@ -15,7 +15,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var JwtKey []byte
+var JwtKey []byte = models.JwtKey
 
 func Signup(w http.ResponseWriter, r *http.Request) {
 	var user models.User
@@ -76,7 +76,8 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 
 	expirationTime := time.Now().Add(24 * time.Hour)
 	claims := &models.Claims{
-		Email: creds.Email,
+		Email:  storedUser.Email,
+		UserID: storedUser.ID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 		},
