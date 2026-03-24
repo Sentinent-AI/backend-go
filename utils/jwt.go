@@ -7,6 +7,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// JwtKey is the global JWT signing key, set from environment variable in main.go
+var JwtKey []byte
+
 var secretKey = []byte("super-secret-key") // TODO: Move to environment variable
 
 func GenerateToken(email string, userID int) (string, error) {
