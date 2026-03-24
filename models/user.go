@@ -5,6 +5,3 @@ type User struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
-
-// JwtKey is the global JWT signing key, set at startup from environment
-var JwtKey []byte
