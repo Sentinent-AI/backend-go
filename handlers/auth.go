@@ -15,7 +15,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var JwtKey []byte
+var JwtKey []byte = models.JwtKey
 
 func Signup(w http.ResponseWriter, r *http.Request) {
 	var user models.User
