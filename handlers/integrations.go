@@ -1,94 +1,37 @@
 package handlers
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
-	"os"
+
 	"sentinent-backend/database"
 	"sentinent-backend/middleware"
 	"sentinent-backend/models"
 	"sentinent-backend/services"
-	"sentinent-backend/utils"
-	"strconv"
-	"time"
 )
 
-var (
-	slackClient     *services.SlackClient
-	tokenEncryptor  *utils.TokenEncryptor
-	slackClientID   string
-	slackClientSecret string
-)
-
-func init() {
-	slackClient = services.NewSlackClient()
-}
-
-// InitIntegrationHandlers initializes the integration handlers with dependencies
-func InitIntegrationHandlers() error {
-	var err error
-	tokenEncryptor, err = utils.NewTokenEncryptor()
-	if err != nil {
-		return err
-	}
-
-	slackClientID = os.Getenv("SLACK_CLIENT_ID")
-	slackClientSecret = os.Getenv("SLACK_CLIENT_SECRET")
-
-	if slackClientID == "" || slackClientSecret == "" {
-		return nil // OAuth will be disabled, but don't fail startup
-	}
-
-	return nil
-}
-
-// SlackAuth initiates the Slack OAuth flow
-func SlackAuth(w http.ResponseWriter, r *http.Request) {
-	if slackClientID == "" {
-		http.Error(w, "Slack integration not configured", http.StatusServiceUnavailable)
+// GitHubAuthHandler initiates the GitHub OAuth flow
+func GitHubAuthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	userID, err := getUserIDFromContext(r)
-	if err != nil {
+	// Get user email from context (must be authenticated)
+	email, ok := r.Context().Value(middleware.UserEmailKey).(string)
+	if !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	// Get workspace_id from query parameter
-	workspaceIDStr := r.URL.Query().Get("workspace_id")
-	if workspaceIDStr == "" {
-		http.Error(w, "workspace_id is required", http.StatusBadRequest)
+	// Generate state parameter (should include user identifier for security)
+	state := email
+
+	authURL := services.GetGitHubAuthURL(state)
+	if authURL == "" {
+		http.Error(w, "GitHub integration not configured", http.StatusInternalServerError)
 		return
 	}
-
-	workspaceID, err := strconv.Atoi(workspaceIDStr)
-	if err != nil {
-		http.Error(w, "Invalid workspace_id", http.StatusBadRequest)
-		return
-	}
-
-	// Store state in a cookie or session (simplified: using cookie)
-	state := generateState(userID, workspaceID)
-
-	// Build OAuth URL
-	redirectURI := getRedirectURI(r)
-	authURL := "https://slack.com/oauth/v2/authorize?" +
-		"client_id=" + slackClientID +
-		"&scope=channels:history,channels:read,chat:write,users:read,im:history,groups:history" +
-		"&redirect_uri=" + redirectURI +
-		"&state=" + state
-
-	// Set state cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:     "slack_oauth_state",
-		Value:    state,
-		Expires:  time.Now().Add(10 * time.Minute),
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
@@ -96,23 +39,10 @@ func SlackAuth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// SlackCallback handles the OAuth callback from Slack
-func SlackCallback(w http.ResponseWriter, r *http.Request) {
-	if slackClientID == "" || slackClientSecret == "" {
-		http.Error(w, "Slack integration not configured", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Verify state
-	stateCookie, err := r.Cookie("slack_oauth_state")
-	if err != nil {
-		http.Error(w, "Invalid state", http.StatusBadRequest)
-		return
-	}
-
-	state := r.URL.Query().Get("state")
-	if state != stateCookie.Value {
-		http.Error(w, "Invalid state", http.StatusBadRequest)
+// GitHubCallbackHandler handles the OAuth callback from GitHub
+func GitHubCallbackHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -123,229 +53,145 @@ func SlackCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange code for token
-	redirectURI := getRedirectURI(r)
-	oauthResp, err := slackClient.ExchangeCodeForToken(slackClientID, slackClientSecret, code, redirectURI)
+	token, err := services.ExchangeGitHubCode(code)
 	if err != nil {
-		http.Error(w, "Failed to exchange token: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Failed to exchange code: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Extract userID and workspaceID from state
-	userID, workspaceID, err := parseState(state)
+	// For now, we need to get the user ID from the state or a session
+	// In a production app, you'd use a secure state parameter with user ID
+	// For this implementation, we'll require the user to be authenticated via cookie
+	userEmail := r.URL.Query().Get("state")
+
+	// Get user ID from database
+	var userID int
+	err = database.DB.QueryRow("SELECT id FROM users WHERE email = ?", userEmail).Scan(&userID)
 	if err != nil {
-		http.Error(w, "Invalid state", http.StatusBadRequest)
+		http.Error(w, "User not found", http.StatusUnauthorized)
 		return
 	}
 
-	// Encrypt tokens
-	encryptedAccessToken, err := tokenEncryptor.Encrypt(oauthResp.AccessToken)
-	if err != nil {
-		http.Error(w, "Failed to encrypt token", http.StatusInternalServerError)
+	// Save the integration
+	if err := services.SaveGitHubIntegration(userID, token); err != nil {
+		http.Error(w, "Failed to save integration: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Prepare metadata
-	metadata := map[string]interface{}{
-		"team_id":      oauthResp.Team.ID,
-		"team_name":    oauthResp.Team.Name,
-		"bot_user_id":  oauthResp.BotUserID,
-		"app_id":       oauthResp.AppID,
-		"scope":        oauthResp.Scope,
-	}
-	metadataJSON, _ := json.Marshal(metadata)
-
-	// Check if integration already exists
-	var existingID int
-	err = database.DB.QueryRow(
-		"SELECT id FROM external_integrations WHERE user_id = ? AND workspace_id = ? AND provider = ?",
-		userID, workspaceID, "slack",
-	).Scan(&existingID)
-
-	if err == sql.ErrNoRows {
-		// Insert new integration
-		_, err = database.DB.Exec(
-			"INSERT INTO external_integrations (user_id, workspace_id, provider, access_token, metadata) VALUES (?, ?, ?, ?, ?)",
-			userID, workspaceID, "slack", encryptedAccessToken, string(metadataJSON),
-		)
-	} else if err == nil {
-		// Update existing integration
-		_, err = database.DB.Exec(
-			"UPDATE external_integrations SET access_token = ?, metadata = ?, updated_at = ? WHERE id = ?",
-			encryptedAccessToken, string(metadataJSON), time.Now(), existingID,
-		)
-	}
-
-	if err != nil {
-		http.Error(w, "Failed to save integration", http.StatusInternalServerError)
-		return
-	}
-
-	// Clear state cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:     "slack_oauth_state",
-		Value:    "",
-		Expires:  time.Unix(0, 0),
-		Path:     "/",
-		HttpOnly: true,
-	})
+	// Trigger initial sync
+	go services.SyncGitHubSignals(userID)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "success",
-		"message": "Slack integration connected successfully",
+		"status": "connected",
 	})
 }
 
-// GetIntegrations lists all integrations for a workspace
-func GetIntegrations(w http.ResponseWriter, r *http.Request) {
+// GitHubReposHandler lists accessible repositories
+func GitHubReposHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	userID, err := getUserIDFromContext(r)
 	if err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	workspaceIDStr := r.URL.Query().Get("workspace_id")
-	if workspaceIDStr == "" {
-		http.Error(w, "workspace_id is required", http.StatusBadRequest)
-		return
-	}
-
-	workspaceID, err := strconv.Atoi(workspaceIDStr)
+	repos, err := services.ListAccessibleRepos(userID)
 	if err != nil {
-		http.Error(w, "Invalid workspace_id", http.StatusBadRequest)
-		return
-	}
-
-	rows, err := database.DB.Query(
-		"SELECT id, user_id, workspace_id, provider, metadata, created_at, updated_at FROM external_integrations WHERE user_id = ? AND workspace_id = ?",
-		userID, workspaceID,
-	)
-	if err != nil {
-		http.Error(w, "Failed to fetch integrations", http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	var integrations []models.ExternalIntegration
-	for rows.Next() {
-		var i models.ExternalIntegration
-		if err := rows.Scan(&i.ID, &i.UserID, &i.WorkspaceID, &i.Provider, &i.Metadata, &i.CreatedAt, &i.UpdatedAt); err != nil {
-			continue
-		}
-		integrations = append(integrations, i)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(integrations)
-}
-
-// DeleteIntegration removes an integration
-func DeleteIntegration(w http.ResponseWriter, r *http.Request) {
-	userID, err := getUserIDFromContext(r)
-	if err != nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	integrationIDStr := r.URL.Path[len("/api/integrations/"):]
-	integrationID, err := strconv.Atoi(integrationIDStr)
-	if err != nil {
-		http.Error(w, "Invalid integration ID", http.StatusBadRequest)
-		return
-	}
-
-	// Verify ownership
-	var ownerID int
-	err = database.DB.QueryRow(
-		"SELECT user_id FROM external_integrations WHERE id = ?",
-		integrationID,
-	).Scan(&ownerID)
-
-	if err == sql.ErrNoRows {
-		http.Error(w, "Integration not found", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		http.Error(w, "Failed to fetch integration", http.StatusInternalServerError)
-		return
-	}
-
-	if ownerID != userID {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	_, err = database.DB.Exec("DELETE FROM external_integrations WHERE id = ?", integrationID)
-	if err != nil {
-		http.Error(w, "Failed to delete integration", http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// GetSlackChannels retrieves channels from Slack for a given integration
-func GetSlackChannels(w http.ResponseWriter, r *http.Request) {
-	userID, err := getUserIDFromContext(r)
-	if err != nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	integrationIDStr := r.URL.Query().Get("integration_id")
-	if integrationIDStr == "" {
-		http.Error(w, "integration_id is required", http.StatusBadRequest)
-		return
-	}
-
-	integrationID, err := strconv.Atoi(integrationIDStr)
-	if err != nil {
-		http.Error(w, "Invalid integration_id", http.StatusBadRequest)
-		return
-	}
-
-	// Get the integration and verify ownership
-	var encryptedToken string
-	err = database.DB.QueryRow(
-		"SELECT access_token FROM external_integrations WHERE id = ? AND user_id = ? AND provider = ?",
-		integrationID, userID, "slack",
-	).Scan(&encryptedToken)
-
-	if err == sql.ErrNoRows {
-		http.Error(w, "Integration not found", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		http.Error(w, "Failed to fetch integration", http.StatusInternalServerError)
-		return
-	}
-
-	// Decrypt token
-	accessToken, err := tokenEncryptor.Decrypt(encryptedToken)
-	if err != nil {
-		http.Error(w, "Failed to decrypt token", http.StatusInternalServerError)
-		return
-	}
-
-	// Fetch channels from Slack
-	channels, rateLimit, err := slackClient.GetChannels(accessToken)
-	if err != nil {
-		if rateLimit != nil && rateLimit.IsRateLimited() {
-			http.Error(w, "Rate limited by Slack API", http.StatusTooManyRequests)
-			return
-		}
-		http.Error(w, "Failed to fetch channels: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Failed to fetch repos: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"channels": channels,
+	json.NewEncoder(w).Encode(repos)
+}
+
+// GitHubSyncHandler triggers a manual sync of GitHub issues and PRs
+func GitHubSyncHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Run sync in background
+	go func() {
+		if err := services.SyncGitHubSignals(userID); err != nil {
+			// Log error - in production, use proper logging
+			println("Sync error:", err.Error())
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "sync_started",
 	})
 }
 
-// Helper functions
+// GitHubDisconnectHandler disconnects the GitHub integration
+func GitHubDisconnectHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if err := services.DeleteGitHubIntegration(userID); err != nil {
+		http.Error(w, "Failed to disconnect: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "disconnected",
+	})
+}
+
+// SignalsHandler retrieves signals for the authenticated user
+func SignalsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Parse filter parameters
+	filter := &models.SignalFilter{}
+	sourceType := r.URL.Query().Get("source_type")
+	if sourceType != "" {
+		filter.SourceType = sourceType
+	}
+
+	signals, err := services.GetUserSignals(userID, filter)
+	if err != nil {
+		http.Error(w, "Failed to fetch signals: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(signals)
+}
+
+// getUserIDFromContext extracts user ID from the request context
 func getUserIDFromContext(r *http.Request) (int, error) {
 	email, ok := r.Context().Value(middleware.UserEmailKey).(string)
 	if !ok {
@@ -361,50 +207,92 @@ func getUserIDFromContext(r *http.Request) (int, error) {
 	return userID, nil
 }
 
-func generateState(userID, workspaceID int) string {
-	// Simple state generation - in production use a more secure method
-	return strconv.Itoa(userID) + ":" + strconv.Itoa(workspaceID) + ":" + strconv.FormatInt(time.Now().Unix(), 10)
+// GitHubWebhookHandler handles GitHub webhook events
+func GitHubWebhookHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	eventType := r.Header.Get("X-GitHub-Event")
+	if eventType == "" {
+		http.Error(w, "Missing event type", http.StatusBadRequest)
+		return
+	}
+
+	// Parse the webhook payload
+	var payload map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	// Handle different event types
+	switch eventType {
+	case "issues":
+		handleIssuesWebhook(payload)
+	case "pull_request":
+		handlePullRequestWebhook(payload)
+	default:
+		// Ignore other events
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
-func parseState(state string) (userID, workspaceID int, err error) {
-	// Simple state parsing
-	parts := make([]string, 0)
-	current := ""
-	for _, c := range state {
-		if c == ':' {
-			parts = append(parts, current)
-			current = ""
-		} else {
-			current += string(c)
-		}
-	}
-	parts = append(parts, current)
-
-	if len(parts) < 2 {
-		return 0, 0, http.ErrNoCookie
+// handleIssuesWebhook processes issues events from GitHub
+func handleIssuesWebhook(payload map[string]interface{}) {
+	// Extract issue data from payload
+	_, ok := payload["issue"].(map[string]interface{})
+	if !ok {
+		return
 	}
 
-	userID, err = strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 0, err
+	action, _ := payload["action"].(string)
+	if action == "opened" || action == "closed" || action == "reopened" || action == "edited" {
+		// In a real implementation, you'd find the user(s) this issue is assigned to
+		// and sync the signal for each of them
+		// For now, we'll skip this as it requires more complex user mapping
 	}
-
-	workspaceID, err = strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, 0, err
-	}
-
-	return userID, workspaceID, nil
 }
 
-func getRedirectURI(r *http.Request) string {
-	// Use environment variable if set, otherwise construct from request
-	if uri := os.Getenv("SLACK_REDIRECT_URI"); uri != "" {
-		return uri
+// handlePullRequestWebhook processes pull request events from GitHub
+func handlePullRequestWebhook(payload map[string]interface{}) {
+	pr, ok := payload["pull_request"].(map[string]interface{})
+	if !ok {
+		return
 	}
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
+
+	action, _ := payload["action"].(string)
+	if action == "opened" || action == "closed" || action == "reopened" || action == "edited" {
+		// Similar to issues webhook
+		_ = pr
 	}
-	return scheme + "://" + r.Host + "/api/integrations/slack/callback"
+}
+
+// IntegrationStatusHandler returns the status of integrations for the user
+func IntegrationStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Get GitHub integration status
+	integration, err := services.GetGitHubIntegration(userID)
+	githubStatus := models.IntegrationStatus{
+		Provider:  "github",
+		Connected: err == nil,
+	}
+	if err == nil {
+		githubStatus.UpdatedAt = integration.UpdatedAt
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode([]models.IntegrationStatus{githubStatus})
 }

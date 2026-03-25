@@ -8,8 +8,8 @@ func TestIsEmailValid(t *testing.T) {
 		expected bool
 	}{
 		{"test@example.com", true},
-		{"TEST@example.com", true},      // Current one might fail this
-		{"test@example.museum", true},   // Current one might fail this (TLD length > 4)
+		{"TEST@example.com", true},    // Current one might fail this
+		{"test@example.museum", true}, // Current one might fail this (TLD length > 4)
 		{"test@sub.example.com", true},
 		{"invalid-email", false},
 		{"@example.com", false},

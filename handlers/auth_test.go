@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sentinent-backend/database"
 	"sentinent-backend/models"
+	"sentinent-backend/utils"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -32,7 +33,7 @@ func setupTestDB() {
 		panic(err)
 	}
 
-	JwtKey = []byte("test-jwt-secret")
+	utils.JwtKey = []byte("test-jwt-secret")
 }
 
 func TestSignup(t *testing.T) {
