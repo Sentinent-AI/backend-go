@@ -76,7 +76,8 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 
 	expirationTime := time.Now().Add(24 * time.Hour)
 	claims := &models.Claims{
-		Email: creds.Email,
+		UserID: storedUser.ID,
+		Email:  creds.Email,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 		},
