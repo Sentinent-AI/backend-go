@@ -46,7 +46,6 @@ func main() {
 		syncService.Start(5 * time.Minute) // Sync every 5 minutes
 		defer syncService.Stop()
 	}
-
 	// Create a new ServeMux for our application routes
 	mux := http.NewServeMux()
 
