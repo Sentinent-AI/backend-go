@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,10 @@ var (
 	githubOAuthConfig  *oauth2.Config
 	tokenEncryptionKey []byte
 )
+
+func IsGitHubConfigured() bool {
+	return githubOAuthConfig != nil && len(tokenEncryptionKey) > 0
+}
 
 // GitHubIssue represents a GitHub issue or PR
 // We use a single struct since the API response is similar
@@ -167,35 +172,68 @@ func SaveGitHubIntegration(userID int, token *oauth2.Token) error {
 		}
 	}
 
-	_, err = database.DB.Exec(
-		`INSERT INTO external_integrations (user_id, provider, access_token, refresh_token, expires_at, updated_at)
-		VALUES (?, 'github', ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(user_id, provider) DO UPDATE SET
-		access_token = excluded.access_token,
-		refresh_token = excluded.refresh_token,
-		expires_at = excluded.expires_at,
-		updated_at = CURRENT_TIMESTAMP`,
-		userID, encryptedToken, encryptedRefreshToken, token.Expiry,
+	result, err := database.DB.Exec(
+		`UPDATE external_integrations
+		 SET access_token = ?, refresh_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE user_id = ? AND provider = 'github' AND workspace_id IS NULL`,
+		encryptedToken, encryptedRefreshToken, token.Expiry, userID,
 	)
+	if err != nil {
+		return err
+	}
 
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected > 0 {
+		return nil
+	}
+
+	_, err = database.DB.Exec(
+		`INSERT INTO external_integrations
+		 (user_id, workspace_id, provider, access_token, refresh_token, expires_at, metadata, updated_at)
+		 VALUES (?, NULL, 'github', ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		userID, encryptedToken, encryptedRefreshToken, token.Expiry, "",
+	)
 	return err
 }
 
 // GetGitHubIntegration retrieves the GitHub integration for a user
 func GetGitHubIntegration(userID int) (*models.ExternalIntegration, error) {
 	var integration models.ExternalIntegration
+	var workspaceID sql.NullInt64
+	var metadata sql.NullString
 	var expiresAt *time.Time
 
 	err := database.DB.QueryRow(
-		`SELECT id, user_id, provider, access_token, refresh_token, expires_at, created_at, updated_at
-		FROM external_integrations WHERE user_id = ? AND provider = 'github'`,
+		`SELECT id, user_id, workspace_id, provider, access_token, refresh_token, expires_at, metadata, created_at, updated_at
+		FROM external_integrations
+		WHERE user_id = ? AND provider = 'github' AND workspace_id IS NULL`,
 		userID,
-	).Scan(&integration.ID, &integration.UserID, &integration.Provider, &integration.AccessToken, &integration.RefreshToken, &expiresAt, &integration.CreatedAt, &integration.UpdatedAt)
+	).Scan(
+		&integration.ID,
+		&integration.UserID,
+		&workspaceID,
+		&integration.Provider,
+		&integration.AccessToken,
+		&integration.RefreshToken,
+		&expiresAt,
+		&metadata,
+		&integration.CreatedAt,
+		&integration.UpdatedAt,
+	)
 
 	if err != nil {
 		return nil, err
 	}
 
+	if workspaceID.Valid {
+		integration.WorkspaceID = int(workspaceID.Int64)
+	}
+	if metadata.Valid {
+		integration.Metadata = metadata.String
+	}
 	integration.ExpiresAt = expiresAt
 	return &integration, nil
 }
@@ -203,7 +241,7 @@ func GetGitHubIntegration(userID int) (*models.ExternalIntegration, error) {
 // DeleteGitHubIntegration removes the GitHub integration for a user
 func DeleteGitHubIntegration(userID int) error {
 	_, err := database.DB.Exec(
-		"DELETE FROM external_integrations WHERE user_id = ? AND provider = 'github'",
+		"DELETE FROM external_integrations WHERE user_id = ? AND provider = 'github' AND workspace_id IS NULL",
 		userID,
 	)
 	return err
@@ -381,16 +419,32 @@ func saveGitHubSignal(userID int, issue GitHubIssue, issueType string) error {
 	}
 
 	_, err = database.DB.Exec(
-		`INSERT INTO signals (user_id, source_type, source_id, title, body, url, status, source_metadata, updated_at)
-		VALUES (?, 'github', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`INSERT INTO signals
+		(user_id, workspace_id, source_type, source_id, external_id, title, content, body, url, author, status, source_metadata, received_at, updated_at)
+		VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(user_id, source_type, source_id) DO UPDATE SET
+		external_id = excluded.external_id,
 		title = excluded.title,
+		content = excluded.content,
 		body = excluded.body,
 		url = excluded.url,
+		author = excluded.author,
 		status = excluded.status,
 		source_metadata = excluded.source_metadata,
+		received_at = excluded.received_at,
 		updated_at = CURRENT_TIMESTAMP`,
-		userID, strconv.FormatInt(issue.ID, 10), issue.Title, issue.Body, issue.HTMLURL, issue.State, string(metadataJSON),
+		userID,
+		models.SourceTypeGitHub,
+		strconv.FormatInt(issue.ID, 10),
+		strconv.FormatInt(issue.ID, 10),
+		issue.Title,
+		issue.Body,
+		issue.Body,
+		issue.HTMLURL,
+		"",
+		issue.State,
+		string(metadataJSON),
+		issue.UpdatedAt,
 	)
 
 	return err
@@ -398,7 +452,7 @@ func saveGitHubSignal(userID int, issue GitHubIssue, issueType string) error {
 
 // GetUserSignals retrieves signals for a user with optional filtering
 func GetUserSignals(userID int, filter *models.SignalFilter) ([]models.Signal, error) {
-	query := `SELECT id, user_id, source_type, source_id, title, body, url, status, source_metadata, created_at, updated_at
+	query := `SELECT id, user_id, workspace_id, source_type, source_id, external_id, title, content, author, body, url, status, source_metadata, received_at, created_at, updated_at
 		FROM signals WHERE user_id = ?`
 	args := []interface{}{userID}
 
@@ -423,16 +477,61 @@ func GetUserSignals(userID int, filter *models.SignalFilter) ([]models.Signal, e
 	var signals []models.Signal
 	for rows.Next() {
 		var signal models.Signal
-		var metadataJSON string
+		var workspaceID sql.NullInt64
+		var externalID sql.NullString
+		var content sql.NullString
+		var author sql.NullString
+		var body sql.NullString
+		var url sql.NullString
+		var metadataJSON sql.NullString
+		var receivedAt sql.NullTime
 
-		err := rows.Scan(&signal.ID, &signal.UserID, &signal.SourceType, &signal.SourceID, &signal.Title, &signal.Body, &signal.URL, &signal.Status, &metadataJSON, &signal.CreatedAt, &signal.UpdatedAt)
+		err := rows.Scan(
+			&signal.ID,
+			&signal.UserID,
+			&workspaceID,
+			&signal.SourceType,
+			&signal.SourceID,
+			&externalID,
+			&signal.Title,
+			&content,
+			&author,
+			&body,
+			&url,
+			&signal.Status,
+			&metadataJSON,
+			&receivedAt,
+			&signal.CreatedAt,
+			&signal.UpdatedAt,
+		)
 		if err != nil {
 			return nil, err
 		}
 
-		if metadataJSON != "" {
+		if workspaceID.Valid {
+			signal.WorkspaceID = int(workspaceID.Int64)
+		}
+		if externalID.Valid {
+			signal.ExternalID = externalID.String
+		}
+		if content.Valid {
+			signal.Content = content.String
+		}
+		if author.Valid {
+			signal.Author = author.String
+		}
+		if body.Valid {
+			signal.Body = body.String
+		}
+		if url.Valid {
+			signal.URL = url.String
+		}
+		if receivedAt.Valid {
+			signal.ReceivedAt = receivedAt.Time
+		}
+		if metadataJSON.Valid && metadataJSON.String != "" {
 			var metadata models.GitHubMetadata
-			if err := json.Unmarshal([]byte(metadataJSON), &metadata); err == nil {
+			if err := json.Unmarshal([]byte(metadataJSON.String), &metadata); err == nil {
 				signal.SourceMetadata = &metadata
 			}
 		}
