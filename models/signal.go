@@ -3,9 +3,10 @@ package models
 import "time"
 
 const (
-	SourceTypeSlack    = "slack"
-	SignalStatusUnread = "unread"
-	SignalStatusRead   = "read"
+	SourceTypeSlack     = "slack"
+	SourceTypeGitHub    = "github"
+	SignalStatusUnread  = "unread"
+	SignalStatusRead    = "read"
 	SignalStatusArchived = "archived"
 )
 
