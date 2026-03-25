@@ -14,10 +14,16 @@ import (
 
 // SyncService handles background synchronization of external integrations
 type SyncService struct {
-	slackClient    *SlackClient
+	slackClient    slackSyncClient
 	tokenEncryptor *utils.TokenEncryptor
 	ticker         *time.Ticker
 	stopChan       chan bool
+}
+
+type slackSyncClient interface {
+	GetChannels(accessToken string) ([]SlackChannel, *RateLimitInfo, error)
+	GetMessages(accessToken, channelID string, limit int, oldest string) ([]SlackMessage, *RateLimitInfo, error)
+	GetUserInfo(accessToken, userID string) (*SlackUserResponse, *RateLimitInfo, error)
 }
 
 // NewSyncService creates a new SyncService
@@ -66,6 +72,12 @@ func (s *SyncService) syncAllIntegrations() {
 	}
 	defer rows.Close()
 
+	type syncRecord struct {
+		integration    models.ExternalIntegration
+		encryptedToken string
+	}
+
+	records := make([]syncRecord, 0)
 	for rows.Next() {
 		var integration models.ExternalIntegration
 		var encryptedToken string
@@ -76,19 +88,34 @@ func (s *SyncService) syncAllIntegrations() {
 		if err != nil {
 			continue
 		}
+		records = append(records, syncRecord{
+			integration:    integration,
+			encryptedToken: encryptedToken,
+		})
+	}
 
+	if err := rows.Err(); err != nil {
+		log.Printf("Failed while iterating integrations: %v", err)
+		return
+	}
+	if err := rows.Close(); err != nil {
+		log.Printf("Failed to close integration rows: %v", err)
+		return
+	}
+
+	for _, record := range records {
 		// Decrypt token
-		accessToken, err := s.tokenEncryptor.Decrypt(encryptedToken)
+		accessToken, err := s.tokenEncryptor.Decrypt(record.encryptedToken)
 		if err != nil {
-			log.Printf("Failed to decrypt token for integration %d: %v", integration.ID, err)
+			log.Printf("Failed to decrypt token for integration %d: %v", record.integration.ID, err)
 			continue
 		}
 
-		switch integration.Provider {
+		switch record.integration.Provider {
 		case "slack":
-			s.syncSlackIntegration(&integration, accessToken)
+			s.syncSlackIntegration(&record.integration, accessToken)
 		default:
-			log.Printf("Unknown provider: %s", integration.Provider)
+			log.Printf("Unknown provider: %s", record.integration.Provider)
 		}
 	}
 }
@@ -147,6 +174,10 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 			if rateLimit != nil && rateLimit.IsRateLimited() {
 				log.Printf("Rate limited by Slack API, waiting %v", rateLimit.WaitDuration())
 				time.Sleep(rateLimit.WaitDuration())
+				continue
+			}
+			if IsSlackAPIError(err, "not_in_channel") {
+				log.Printf("Skipping Slack channel %s during sync: %v", channelID, err)
 				continue
 			}
 			log.Printf("Failed to fetch messages from channel %s: %v", channelID, err)

@@ -8,11 +8,183 @@ import (
 	"net/url"
 	"sentinent-backend/database"
 	"sentinent-backend/middleware"
+	"sentinent-backend/services"
+	"sentinent-backend/utils"
 	"testing"
 	"time"
 
 	"golang.org/x/oauth2"
 )
+
+func TestSlackAuthHandlerSetsSignedState(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+
+	if _, err := database.DB.Exec(
+		"INSERT INTO users (email, password) VALUES (?, ?)",
+		"octo@example.com", "hashed-password",
+	); err != nil {
+		t.Fatalf("failed to seed user: %v", err)
+	}
+
+	originalSlackClientID := slackClientID
+	originalSlackClientSecret := slackClientSecret
+	originalTokenEncryptor := tokenEncryptor
+	t.Setenv("TOKEN_ENCRYPTION_KEY", "test-encryption-key-32-bytes-long!")
+
+	encryptor, err := utils.NewTokenEncryptor()
+	if err != nil {
+		t.Fatalf("failed to create encryptor: %v", err)
+	}
+
+	slackClientID = "client-id"
+	slackClientSecret = "client-secret"
+	tokenEncryptor = encryptor
+	t.Cleanup(func() {
+		slackClientID = originalSlackClientID
+		slackClientSecret = originalSlackClientSecret
+		tokenEncryptor = originalTokenEncryptor
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations/slack/auth?workspace_id=7", nil)
+	req = req.WithContext(context.WithValue(req.Context(), middleware.UserEmailKey, "octo@example.com"))
+	rr := httptest.NewRecorder()
+
+	SlackAuth(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var payload map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&payload); err != nil {
+		t.Fatalf("expected JSON response: %v", err)
+	}
+
+	authURL, err := url.Parse(payload["auth_url"])
+	if err != nil {
+		t.Fatalf("failed to parse auth URL: %v", err)
+	}
+
+	userID, workspaceID, err := validateSlackOAuthState(authURL.Query().Get("state"))
+	if err != nil {
+		t.Fatalf("expected signed state to validate: %v", err)
+	}
+	if userID != 1 || workspaceID != 7 {
+		t.Fatalf("expected user 1 workspace 7, got user %d workspace %d", userID, workspaceID)
+	}
+}
+
+func TestValidateSlackOAuthStateRejectsExpiredState(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+
+	state, err := createSlackOAuthState(1, 7, time.Now().Add(-slackOAuthStateTTL-time.Minute))
+	if err != nil {
+		t.Fatalf("failed to create expired state: %v", err)
+	}
+
+	if _, _, err := validateSlackOAuthState(state); err == nil {
+		t.Fatal("expected expired state to be rejected")
+	}
+}
+
+func TestSlackCallbackHandlerAcceptsValidStateWithoutCookie(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+
+	if _, err := database.DB.Exec(`
+		CREATE TABLE external_integrations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			workspace_id INTEGER,
+			provider TEXT NOT NULL,
+			access_token TEXT NOT NULL,
+			refresh_token TEXT,
+			expires_at DATETIME,
+			metadata TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`); err != nil {
+		t.Fatalf("failed to create external_integrations table: %v", err)
+	}
+
+	if _, err := database.DB.Exec(
+		"INSERT INTO users (email, password) VALUES (?, ?)",
+		"octo@example.com", "hashed-password",
+	); err != nil {
+		t.Fatalf("failed to seed user: %v", err)
+	}
+
+	originalSlackClientID := slackClientID
+	originalSlackClientSecret := slackClientSecret
+	originalTokenEncryptor := tokenEncryptor
+	originalSlackExchangeCodeFunc := slackExchangeCodeFunc
+	t.Setenv("TOKEN_ENCRYPTION_KEY", "test-encryption-key-32-bytes-long!")
+	t.Setenv("SLACK_REDIRECT_URI", "https://example.ngrok.app/api/integrations/slack/callback")
+
+	encryptor, err := utils.NewTokenEncryptor()
+	if err != nil {
+		t.Fatalf("failed to create encryptor: %v", err)
+	}
+
+	slackClientID = "client-id"
+	slackClientSecret = "client-secret"
+	tokenEncryptor = encryptor
+	slackExchangeCodeFunc = func(clientID, clientSecret, code, redirectURI string) (*services.SlackOAuthResponse, error) {
+		if clientID != "client-id" || clientSecret != "client-secret" {
+			t.Fatalf("unexpected Slack client credentials: %q %q", clientID, clientSecret)
+		}
+		if code != "test-code" {
+			t.Fatalf("expected code test-code, got %q", code)
+		}
+		if redirectURI != "https://example.ngrok.app/api/integrations/slack/callback" {
+			t.Fatalf("unexpected redirect URI: %q", redirectURI)
+		}
+
+		resp := &services.SlackOAuthResponse{
+			OK:          true,
+			AccessToken: "slack-test-token",
+			Scope:       "channels:read,groups:read",
+			BotUserID:   "B123",
+			AppID:       "A123",
+		}
+		resp.Team.ID = "T123"
+		resp.Team.Name = "Workspace"
+		return resp, nil
+	}
+	t.Cleanup(func() {
+		slackClientID = originalSlackClientID
+		slackClientSecret = originalSlackClientSecret
+		tokenEncryptor = originalTokenEncryptor
+		slackExchangeCodeFunc = originalSlackExchangeCodeFunc
+	})
+
+	state, err := createSlackOAuthState(1, 7, time.Now())
+	if err != nil {
+		t.Fatalf("failed to create state: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations/slack/callback?code=test-code&state="+url.QueryEscape(state), nil)
+	rr := httptest.NewRecorder()
+
+	SlackCallback(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var count int
+	if err := database.DB.QueryRow(
+		"SELECT count(*) FROM external_integrations WHERE user_id = ? AND workspace_id = ? AND provider = 'slack'",
+		1, 7,
+	).Scan(&count); err != nil {
+		t.Fatalf("failed to query saved integration: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 saved slack integration, got %d", count)
+	}
+}
 
 func TestGitHubAuthHandlerSetsSignedStateCookie(t *testing.T) {
 	setupTestDB()

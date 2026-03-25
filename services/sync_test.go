@@ -5,20 +5,40 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sentinent-backend/database"
 	"sentinent-backend/models"
+	"sentinent-backend/utils"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func setupSyncTestDB(t *testing.T) {
+type mockSlackSyncClient struct {
+	channels []SlackChannel
+	messages []SlackMessage
+	msgErr   error
+}
+
+func (m *mockSlackSyncClient) GetChannels(accessToken string) ([]SlackChannel, *RateLimitInfo, error) {
+	return m.channels, nil, nil
+}
+
+func (m *mockSlackSyncClient) GetMessages(accessToken, channelID string, limit int, oldest string) ([]SlackMessage, *RateLimitInfo, error) {
+	return m.messages, nil, m.msgErr
+}
+
+func (m *mockSlackSyncClient) GetUserInfo(accessToken, userID string) (*SlackUserResponse, *RateLimitInfo, error) {
+	return nil, nil, nil
+}
+
+func setupSyncTestDB(t *testing.T) func() {
 	t.Helper()
 
-	var err error
-	database.DB, err = sql.Open("sqlite3", ":memory:")
+	dbPath := filepath.Join(t.TempDir(), "sync-test.db")
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		t.Fatalf("failed to open test db: %v", err)
+		t.Fatalf("failed to open sqlite db: %v", err)
 	}
 
 	statements := []string{
@@ -47,28 +67,32 @@ func setupSyncTestDB(t *testing.T) {
 			workspace_id INTEGER,
 			provider TEXT NOT NULL,
 			access_token TEXT NOT NULL,
+			refresh_token TEXT,
+			expires_at DATETIME,
 			metadata TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
 	}
 
 	for _, statement := range statements {
-		if _, err := database.DB.Exec(statement); err != nil {
+		if _, err := db.Exec(statement); err != nil {
 			t.Fatalf("failed to prepare sync test schema: %v", err)
 		}
 	}
 
-	if _, err := database.DB.Exec(
-		`INSERT INTO external_integrations (id, user_id, workspace_id, provider, access_token, metadata)
-		 VALUES (1, 42, 7, 'slack', 'encrypted-token', '{"selected_channels":["C123"]}')`,
-	); err != nil {
-		t.Fatalf("failed to seed integration: %v", err)
+	originalDB := database.DB
+	database.DB = db
+
+	return func() {
+		database.DB = originalDB
+		_ = db.Close()
 	}
 }
 
 func TestSyncSlackIntegrationStoresMultipleMessagesPerChannelWithoutDuplicates(t *testing.T) {
-	setupSyncTestDB(t)
-	defer database.DB.Close()
+	cleanup := setupSyncTestDB(t)
+	defer cleanup()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -158,5 +182,104 @@ func TestSyncSlackIntegrationStoresMultipleMessagesPerChannelWithoutDuplicates(t
 	}
 	if rowsRead != 2 {
 		t.Fatalf("expected to inspect 2 rows, got %d", rowsRead)
+	}
+}
+
+func TestSyncAllIntegrationsUpdatesSlackMetadata(t *testing.T) {
+	cleanup := setupSyncTestDB(t)
+	defer cleanup()
+
+	t.Setenv("TOKEN_ENCRYPTION_KEY", "test-encryption-key-32-bytes-long!")
+	encryptor, err := utils.NewTokenEncryptor()
+	if err != nil {
+		t.Fatalf("failed to create encryptor: %v", err)
+	}
+
+	encryptedToken, err := encryptor.Encrypt("slack-token")
+	if err != nil {
+		t.Fatalf("failed to encrypt token: %v", err)
+	}
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO external_integrations (user_id, workspace_id, provider, access_token, metadata)
+		 VALUES (?, ?, 'slack', ?, '{}')`,
+		1, 1, encryptedToken,
+	); err != nil {
+		t.Fatalf("failed to seed integration: %v", err)
+	}
+
+	service := NewSyncService(encryptor)
+	service.slackClient = &mockSlackSyncClient{
+		channels: []SlackChannel{{ID: "C123", Name: "general"}},
+	}
+
+	service.syncAllIntegrations()
+
+	var metadataJSON string
+	if err := database.DB.QueryRow(
+		"SELECT metadata FROM external_integrations WHERE provider = 'slack'",
+	).Scan(&metadataJSON); err != nil {
+		t.Fatalf("failed to query integration metadata: %v", err)
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+		t.Fatalf("failed to unmarshal metadata: %v", err)
+	}
+	if _, ok := metadata["last_sync"]; !ok {
+		t.Fatalf("expected last_sync in metadata, got %s", metadataJSON)
+	}
+}
+
+func TestSyncSlackIntegrationSkipsNotInChannelErrors(t *testing.T) {
+	cleanup := setupSyncTestDB(t)
+	defer cleanup()
+
+	t.Setenv("TOKEN_ENCRYPTION_KEY", "test-encryption-key-32-bytes-long!")
+	encryptor, err := utils.NewTokenEncryptor()
+	if err != nil {
+		t.Fatalf("failed to create encryptor: %v", err)
+	}
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO external_integrations (id, user_id, workspace_id, provider, access_token, metadata)
+		 VALUES (?, ?, ?, 'slack', ?, '{}')`,
+		1, 1, 1, "ignored",
+	); err != nil {
+		t.Fatalf("failed to seed integration: %v", err)
+	}
+
+	service := NewSyncService(encryptor)
+	service.slackClient = &mockSlackSyncClient{
+		channels: []SlackChannel{{ID: "C123", Name: "general"}},
+		msgErr:   &SlackAPIError{Code: "not_in_channel"},
+	}
+
+	integration := &models.ExternalIntegration{
+		ID:          1,
+		UserID:      1,
+		WorkspaceID: 1,
+		Provider:    "slack",
+		Metadata:    "{}",
+	}
+
+	service.syncSlackIntegration(integration, "slack-token")
+
+	var metadataJSON string
+	if err := database.DB.QueryRow(
+		"SELECT metadata FROM external_integrations WHERE id = 1",
+	).Scan(&metadataJSON); err != nil {
+		t.Fatalf("failed to query integration metadata: %v", err)
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+		t.Fatalf("failed to unmarshal metadata: %v", err)
+	}
+	if _, ok := metadata["last_sync"]; !ok {
+		t.Fatalf("expected last_sync after skipping inaccessible channel, got %s", metadataJSON)
+	}
+	if !IsSlackAPIError(service.slackClient.(*mockSlackSyncClient).msgErr, "not_in_channel") {
+		t.Fatal("expected not_in_channel to be recognized as a Slack API error")
 	}
 }
