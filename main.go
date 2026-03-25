@@ -10,6 +10,7 @@ import (
 	"sentinent-backend/services"
 	"sentinent-backend/utils"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -29,9 +30,19 @@ func main() {
 
 	database.InitDB()
 
-	// Initialize GitHub service (optional - won't fail if env vars not set)
+	// Initialize optional integration providers.
+	if err := handlers.InitIntegrationHandlers(); err != nil {
+		log.Printf("Some integrations are unavailable: %v", err)
+	}
 	if err := services.InitGitHubService(); err != nil {
 		log.Printf("GitHub integration not configured: %v", err)
+	}
+	if tokenEncryptor, err := utils.NewTokenEncryptor(); err == nil {
+		syncService := services.NewSyncService(tokenEncryptor)
+		syncService.Start(5 * time.Minute)
+		defer syncService.Stop()
+	} else {
+		log.Printf("Background integration sync disabled: %v", err)
 	}
 
 	// Create a new ServeMux for our application routes
@@ -41,7 +52,8 @@ func main() {
 	mux.HandleFunc("/api/signup", handlers.Signup)
 	mux.HandleFunc("/api/login", handlers.Signin) // Frontend calls /login
 
-	// GitHub OAuth callback (public)
+	// Provider callbacks (public)
+	mux.HandleFunc("/api/integrations/slack/callback", handlers.SlackCallback)
 	mux.HandleFunc("/api/integrations/github/callback", handlers.GitHubCallbackHandler)
 
 	// Protected routes
@@ -57,14 +69,39 @@ func main() {
 	mux.Handle("/api/protected", middleware.AuthMiddleware(protectedHandler))
 
 	// Integration routes (protected)
+	mux.Handle("/api/integrations", middleware.AuthMiddleware(http.HandlerFunc(handlers.GetIntegrations)))
+	mux.Handle("/api/integrations/slack/auth", middleware.AuthMiddleware(http.HandlerFunc(handlers.SlackAuth)))
+	mux.Handle("/api/integrations/slack/channels", middleware.AuthMiddleware(http.HandlerFunc(handlers.GetSlackChannels)))
 	mux.Handle("/api/integrations/github/auth", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubAuthHandler)))
 	mux.Handle("/api/integrations/github/repos", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubReposHandler)))
 	mux.Handle("/api/integrations/github/sync", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubSyncHandler)))
 	mux.Handle("/api/integrations/github", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubDisconnectHandler)))
 	mux.Handle("/api/integrations/status", middleware.AuthMiddleware(http.HandlerFunc(handlers.IntegrationStatusHandler)))
+	mux.Handle("/api/integrations/", middleware.AuthMiddleware(http.HandlerFunc(handlers.DeleteIntegration)))
 
-	// Signals routes (protected)
+	// Signal routes (protected)
 	mux.Handle("/api/signals", middleware.AuthMiddleware(http.HandlerFunc(handlers.SignalsHandler)))
+	mux.Handle("/api/workspaces/", middleware.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/signals") && r.Method == http.MethodGet {
+			handlers.GetSignals(w, r)
+			return
+		}
+		http.Error(w, "Not found", http.StatusNotFound)
+	})))
+	mux.Handle("/api/signals/", middleware.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case r.Method == http.MethodGet && !strings.HasSuffix(path, "/read") && !strings.HasSuffix(path, "/archive"):
+			handlers.GetSignal(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/read"):
+			handlers.MarkSignalAsRead(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/archive"):
+			handlers.ArchiveSignal(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
 
 	// Webhook routes (public, but should verify signature in production)
 	mux.HandleFunc("/api/webhooks/github", handlers.GitHubWebhookHandler)
