@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sentinent-backend/database"
 	"sentinent-backend/middleware"
+	"sentinent-backend/models"
 	"sentinent-backend/services"
 	"sentinent-backend/utils"
 	"testing"
@@ -366,5 +367,213 @@ func TestGitHubCallbackHandlerAcceptsValidState(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("expected GitHub sync to be triggered")
+	}
+}
+
+func setupIntegrationsTestDB(t *testing.T) {
+	t.Helper()
+
+	setupTestDB()
+
+	if _, err := database.DB.Exec(`
+		CREATE TABLE IF NOT EXISTS external_integrations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			workspace_id INTEGER,
+			provider TEXT NOT NULL,
+			access_token TEXT NOT NULL,
+			refresh_token TEXT,
+			expires_at DATETIME,
+			metadata TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`); err != nil {
+		t.Fatalf("failed to create external_integrations table: %v", err)
+	}
+
+	if _, err := database.DB.Exec(
+		"INSERT INTO users (id, email, password) VALUES (1, 'reader@example.com', 'hashed-password')",
+	); err != nil {
+		t.Fatalf("failed to seed primary integration user: %v", err)
+	}
+
+	if _, err := database.DB.Exec(
+		"INSERT INTO users (id, email, password) VALUES (2, 'other@example.com', 'hashed-password')",
+	); err != nil {
+		t.Fatalf("failed to seed secondary integration user: %v", err)
+	}
+}
+
+func integrationRequestWithUser(method, target, email string) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	return req.WithContext(context.WithValue(req.Context(), middleware.UserEmailKey, email))
+}
+
+func TestGetIntegrationsFiltersByWorkspaceAndIncludesGlobalIntegrations(t *testing.T) {
+	setupIntegrationsTestDB(t)
+	defer database.DB.Close()
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO external_integrations
+			(id, user_id, workspace_id, provider, access_token, metadata)
+		 VALUES
+			(1, 1, 9, 'slack', 'token-1', '{"team":"workspace-9"}'),
+			(2, 1, NULL, 'github', 'token-2', '{"scope":"global"}'),
+			(3, 1, 10, 'slack', 'token-3', '{"team":"workspace-10"}'),
+			(4, 2, 9, 'slack', 'token-4', '{"team":"other-user"}')`,
+	); err != nil {
+		t.Fatalf("failed to seed integrations: %v", err)
+	}
+
+	req := integrationRequestWithUser(http.MethodGet, "/api/integrations?workspace_id=9", "reader@example.com")
+	rr := httptest.NewRecorder()
+
+	GetIntegrations(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var integrations []models.ExternalIntegration
+	if err := json.NewDecoder(rr.Body).Decode(&integrations); err != nil {
+		t.Fatalf("failed to decode integrations response: %v", err)
+	}
+
+	if len(integrations) != 2 {
+		t.Fatalf("expected 2 integrations, got %d", len(integrations))
+	}
+
+	var workspaceScoped, globalScoped bool
+	for _, integration := range integrations {
+		if integration.Provider == "slack" && integration.WorkspaceID == 9 {
+			workspaceScoped = true
+		}
+		if integration.Provider == "github" && integration.Metadata == `{"scope":"global"}` {
+			globalScoped = true
+		}
+	}
+
+	if !workspaceScoped || !globalScoped {
+		t.Fatalf("expected one workspace-scoped and one global integration, got %+v", integrations)
+	}
+}
+
+func TestDeleteIntegrationDeletesOwnedIntegration(t *testing.T) {
+	setupIntegrationsTestDB(t)
+	defer database.DB.Close()
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO external_integrations
+			(id, user_id, workspace_id, provider, access_token, metadata)
+		 VALUES (5, 1, 9, 'slack', 'token-5', '{"team":"workspace-9"}')`,
+	); err != nil {
+		t.Fatalf("failed to seed integration: %v", err)
+	}
+
+	req := integrationRequestWithUser(http.MethodDelete, "/api/integrations/5", "reader@example.com")
+	rr := httptest.NewRecorder()
+
+	DeleteIntegration(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected status 204, got %d", rr.Code)
+	}
+
+	var count int
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM external_integrations WHERE id = 5").Scan(&count); err != nil {
+		t.Fatalf("failed to verify delete: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected integration to be deleted, found %d rows", count)
+	}
+}
+
+func TestDeleteIntegrationRejectsDifferentOwner(t *testing.T) {
+	setupIntegrationsTestDB(t)
+	defer database.DB.Close()
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO external_integrations
+			(id, user_id, workspace_id, provider, access_token, metadata)
+		 VALUES (6, 2, 9, 'slack', 'token-6', '{"team":"workspace-9"}')`,
+	); err != nil {
+		t.Fatalf("failed to seed foreign integration: %v", err)
+	}
+
+	req := integrationRequestWithUser(http.MethodDelete, "/api/integrations/6", "reader@example.com")
+	rr := httptest.NewRecorder()
+
+	DeleteIntegration(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rr.Code)
+	}
+}
+
+func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
+	setupIntegrationsTestDB(t)
+	defer database.DB.Close()
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO external_integrations
+			(id, user_id, workspace_id, provider, access_token, metadata)
+		 VALUES
+			(7, 1, 9, 'slack', 'token-7', '{"team":"workspace-9"}'),
+			(8, 1, NULL, 'github', 'token-8', '{"scope":"global"}')`,
+	); err != nil {
+		t.Fatalf("failed to seed integration statuses: %v", err)
+	}
+
+	originalSlackClientID := slackClientID
+	originalSlackClientSecret := slackClientSecret
+	originalTokenEncryptor := tokenEncryptor
+	t.Cleanup(func() {
+		slackClientID = originalSlackClientID
+		slackClientSecret = originalSlackClientSecret
+		tokenEncryptor = originalTokenEncryptor
+	})
+
+	t.Setenv("TOKEN_ENCRYPTION_KEY", "test-encryption-key-32-bytes-long!")
+	encryptor, err := utils.NewTokenEncryptor()
+	if err != nil {
+		t.Fatalf("failed to create token encryptor: %v", err)
+	}
+	slackClientID = "slack-client"
+	slackClientSecret = "slack-secret"
+	tokenEncryptor = encryptor
+
+	req := integrationRequestWithUser(http.MethodGet, "/api/integrations/status?workspace_id=9", "reader@example.com")
+	rr := httptest.NewRecorder()
+
+	IntegrationStatusHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var statuses []models.IntegrationStatus
+	if err := json.NewDecoder(rr.Body).Decode(&statuses); err != nil {
+		t.Fatalf("failed to decode integration statuses: %v", err)
+	}
+
+	if len(statuses) != 2 {
+		t.Fatalf("expected 2 statuses, got %d", len(statuses))
+	}
+
+	var slackStatus, githubStatus *models.IntegrationStatus
+	for i := range statuses {
+		switch statuses[i].Provider {
+		case "slack":
+			slackStatus = &statuses[i]
+		case "github":
+			githubStatus = &statuses[i]
+		}
+	}
+
+	if slackStatus == nil || !slackStatus.Configured || !slackStatus.Connected {
+		t.Fatalf("expected configured and connected slack status, got %+v", slackStatus)
+	}
+	if githubStatus == nil || !githubStatus.Connected {
+		t.Fatalf("expected connected github status, got %+v", githubStatus)
 	}
 }
