@@ -26,10 +26,24 @@ func InitDB() {
 		`CREATE TABLE IF NOT EXISTS workspaces (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
+			description TEXT DEFAULT '',
 			owner_id INTEGER NOT NULL,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (owner_id) REFERENCES users(id)
+		);`,
+		`CREATE TABLE IF NOT EXISTS decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workspace_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			title TEXT NOT NULL,
+			description TEXT,
+			status TEXT NOT NULL CHECK (status IN ('DRAFT', 'OPEN', 'CLOSED')),
+			due_date DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+			FOREIGN KEY (user_id) REFERENCES users(id)
 		);`,
 		`CREATE TABLE IF NOT EXISTS workspace_members (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +141,8 @@ func InitDB() {
 	ensureColumn("external_integrations", "expires_at", "DATETIME")
 	ensureColumn("external_integrations", "metadata", "TEXT")
 
+	ensureColumn("workspaces", "description", "TEXT DEFAULT ''")
+
 	ensureColumn("signals", "workspace_id", "INTEGER")
 	ensureColumn("signals", "external_id", "TEXT")
 	ensureColumn("signals", "content", "TEXT")
@@ -136,6 +152,13 @@ func InitDB() {
 	ensureColumn("signals", "source_metadata", "TEXT")
 	ensureColumn("signals", "received_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
 	ensureColumn("signals", "updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
+
+	if _, err := DB.Exec(`CREATE INDEX IF NOT EXISTS idx_decisions_workspace_id ON decisions(workspace_id);`); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := DB.Exec(`CREATE INDEX IF NOT EXISTS idx_decisions_user_id ON decisions(user_id);`); err != nil {
+		log.Fatal(err)
+	}
 
 	ensureWorkspaceOwnerMemberships()
 }

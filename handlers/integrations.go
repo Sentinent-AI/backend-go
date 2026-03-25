@@ -314,7 +314,7 @@ func DeleteIntegration(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetSlackChannels(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodPatch {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -326,6 +326,11 @@ func GetSlackChannels(w http.ResponseWriter, r *http.Request) {
 	userID, err := getUserIDFromContext(r)
 	if err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if r.Method == http.MethodPatch {
+		updateSlackChannelSelection(w, r, userID)
 		return
 	}
 
@@ -483,7 +488,7 @@ func GitHubCallbackHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func GitHubReposHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodPatch {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -491,6 +496,11 @@ func GitHubReposHandler(w http.ResponseWriter, r *http.Request) {
 	userID, err := getUserIDFromContext(r)
 	if err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if r.Method == http.MethodPatch {
+		updateGitHubRepoSelection(w, r, userID)
 		return
 	}
 
@@ -685,6 +695,125 @@ func buildIntegrationStatus(userID int, provider string, configured bool, worksp
 	}
 
 	return status
+}
+
+func updateSlackChannelSelection(w http.ResponseWriter, r *http.Request, userID int) {
+	workspaceIDStr := r.URL.Query().Get("workspace_id")
+	if workspaceIDStr == "" {
+		http.Error(w, "workspace_id is required", http.StatusBadRequest)
+		return
+	}
+
+	workspaceID, err := strconv.Atoi(workspaceIDStr)
+	if err != nil {
+		http.Error(w, "Invalid workspace_id", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		ChannelIDs []string `json:"channel_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := updateIntegrationMetadata(
+		userID,
+		"slack",
+		&workspaceID,
+		func(metadata map[string]interface{}) {
+			metadata["selected_channels"] = req.ChannelIDs
+		},
+	); err != nil {
+		writeIntegrationUpdateError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func updateGitHubRepoSelection(w http.ResponseWriter, r *http.Request, userID int) {
+	var req struct {
+		RepoIDs []int `json:"repo_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := updateIntegrationMetadata(
+		userID,
+		"github",
+		nil,
+		func(metadata map[string]interface{}) {
+			metadata["selected_repo_ids"] = req.RepoIDs
+		},
+	); err != nil {
+		writeIntegrationUpdateError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func updateIntegrationMetadata(
+	userID int,
+	provider string,
+	workspaceID *int,
+	mutate func(metadata map[string]interface{}),
+) error {
+	var (
+		query    string
+		args     []interface{}
+		rowID    int
+		metadata sql.NullString
+	)
+
+	switch {
+	case workspaceID != nil:
+		query = `SELECT id, metadata FROM external_integrations
+			WHERE user_id = ? AND provider = ? AND workspace_id = ?`
+		args = []interface{}{userID, provider, *workspaceID}
+	default:
+		query = `SELECT id, metadata FROM external_integrations
+			WHERE user_id = ? AND provider = ? AND workspace_id IS NULL`
+		args = []interface{}{userID, provider}
+	}
+
+	if err := database.DB.QueryRow(query, args...).Scan(&rowID, &metadata); err != nil {
+		return err
+	}
+
+	payload := map[string]interface{}{}
+	if metadata.Valid && metadata.String != "" {
+		if err := json.Unmarshal([]byte(metadata.String), &payload); err != nil {
+			return err
+		}
+	}
+	mutate(payload)
+
+	metadataJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = database.DB.Exec(
+		`UPDATE external_integrations
+		 SET metadata = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		string(metadataJSON), rowID,
+	)
+	return err
+}
+
+func writeIntegrationUpdateError(w http.ResponseWriter, err error) {
+	switch err {
+	case sql.ErrNoRows:
+		http.Error(w, "Integration not found", http.StatusNotFound)
+	default:
+		http.Error(w, "Failed to update integration", http.StatusInternalServerError)
+	}
 }
 
 func getUserIDFromContext(r *http.Request) (int, error) {
