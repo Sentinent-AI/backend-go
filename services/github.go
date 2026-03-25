@@ -280,19 +280,6 @@ func FetchAssignedIssues(userID int) ([]GitHubIssue, error) {
 	})
 }
 
-// FetchAssignedPullRequests fetches pull requests assigned to the user
-func FetchAssignedPullRequests(userID int) ([]GitHubIssue, error) {
-	client, err := GetGitHubClient(userID)
-	if err != nil {
-		return nil, err
-	}
-
-	return fetchGitHubIssues(client, "pulls", map[string]string{
-		"filter": "assigned",
-		"state":  "all",
-	})
-}
-
 // fetchGitHubIssues fetches issues or PRs from GitHub API with pagination
 func fetchGitHubIssues(client *http.Client, endpoint string, params map[string]string) ([]GitHubIssue, error) {
 	var allIssues []GitHubIssue
@@ -360,27 +347,32 @@ func fetchGitHubIssues(client *http.Client, endpoint string, params map[string]s
 	return allIssues, nil
 }
 
+func splitGitHubIssuesAndPullRequests(items []GitHubIssue) ([]GitHubIssue, []GitHubIssue) {
+	issues := make([]GitHubIssue, 0, len(items))
+	prs := make([]GitHubIssue, 0, len(items))
+
+	for _, item := range items {
+		if item.PullRequest != nil {
+			prs = append(prs, item)
+			continue
+		}
+		issues = append(issues, item)
+	}
+
+	return issues, prs
+}
+
 // SyncGitHubSignals syncs GitHub issues and PRs to signals
 func SyncGitHubSignals(userID int) error {
-	// Fetch issues
-	issues, err := FetchAssignedIssues(userID)
+	items, err := FetchAssignedIssues(userID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch issues: %w", err)
 	}
 
-	// Fetch PRs
-	prs, err := FetchAssignedPullRequests(userID)
-	if err != nil {
-		return fmt.Errorf("failed to fetch PRs: %w", err)
-	}
+	issues, prs := splitGitHubIssuesAndPullRequests(items)
 
 	// Save issues as signals
 	for _, issue := range issues {
-		// Skip if it's a PR (GitHub API returns PRs in issues endpoint too)
-		if issue.PullRequest != nil {
-			continue
-		}
-
 		if err := saveGitHubSignal(userID, issue, "issue"); err != nil {
 			// Log error but continue with other items
 			fmt.Printf("Failed to save issue signal: %v\n", err)
