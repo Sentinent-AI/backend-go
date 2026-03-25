@@ -19,17 +19,17 @@ import (
 )
 
 var (
-	slackClient                = services.NewSlackClient()
-	tokenEncryptor             *utils.TokenEncryptor
-	slackClientID              string
-	slackClientSecret          string
-	slackExchangeCodeFunc      = func(clientID, clientSecret, code, redirectURI string) (*services.SlackOAuthResponse, error) {
+	slackClient           = services.NewSlackClient()
+	tokenEncryptor        *utils.TokenEncryptor
+	slackClientID         string
+	slackClientSecret     string
+	slackExchangeCodeFunc = func(clientID, clientSecret, code, redirectURI string) (*services.SlackOAuthResponse, error) {
 		return slackClient.ExchangeCodeForToken(clientID, clientSecret, code, redirectURI)
 	}
-	githubAuthURLFunc          = services.GetGitHubAuthURL
-	githubExchangeCodeFunc     = services.ExchangeGitHubCode
-	githubSaveIntegrationFunc  = services.SaveGitHubIntegration
-	githubSyncSignalsFunc      = services.SyncGitHubSignals
+	githubAuthURLFunc         = services.GetGitHubAuthURL
+	githubExchangeCodeFunc    = services.ExchangeGitHubCode
+	githubSaveIntegrationFunc = services.SaveGitHubIntegration
+	githubSyncSignalsFunc     = services.SyncGitHubSignals
 )
 
 const (
@@ -688,11 +688,14 @@ func buildIntegrationStatus(userID int, provider string, configured bool, worksp
 }
 
 func getUserIDFromContext(r *http.Request) (int, error) {
-	email, ok := r.Context().Value(middleware.UserEmailKey).(string)
+	if userID, ok := middleware.GetUserID(r.Context()); ok {
+		return userID, nil
+	}
+
+	email, ok := middleware.GetUserEmail(r.Context())
 	if !ok {
 		return 0, http.ErrNoCookie
 	}
-
 	var userID int
 	err := database.DB.QueryRow("SELECT id FROM users WHERE email = ?", email).Scan(&userID)
 	if err != nil {
