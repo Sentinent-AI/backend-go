@@ -63,7 +63,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		userID := claims.UserID
-		if userID == 0 && claims.Email != "" {
+		if userID == 0 && claims.Email != "" && database.DB != nil {
 			err = database.DB.QueryRow("SELECT id FROM users WHERE email = ?", claims.Email).Scan(&userID)
 			if err == sql.ErrNoRows {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
