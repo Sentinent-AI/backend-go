@@ -444,21 +444,25 @@ func saveGitHubSignal(userID int, issue GitHubIssue, issueType string) error {
 
 // GetUserSignals retrieves signals for a user with optional filtering
 func GetUserSignals(userID int, filter *models.SignalFilter) ([]models.Signal, error) {
-	query := `SELECT id, user_id, workspace_id, source_type, source_id, external_id, title, content, author, body, url, status, source_metadata, received_at, created_at, updated_at
-		FROM signals WHERE user_id = ?`
-	args := []interface{}{userID}
+	query := `SELECT s.id, s.user_id, s.workspace_id, s.source_type, s.source_id, s.external_id,
+		s.title, s.content, s.author, s.body, s.url, COALESCE(ss.status, s.status) as status,
+		s.source_metadata, s.received_at, s.created_at, s.updated_at
+		FROM signals s
+		LEFT JOIN signal_status ss ON s.id = ss.signal_id AND ss.user_id = ?
+		WHERE s.user_id = ?`
+	args := []interface{}{userID, userID}
 
 	if filter != nil && filter.SourceType != "" {
-		query += " AND source_type = ?"
+		query += " AND s.source_type = ?"
 		args = append(args, filter.SourceType)
 	}
 
 	if filter != nil && filter.Status != "" {
-		query += " AND status = ?"
+		query += " AND COALESCE(ss.status, s.status) = ?"
 		args = append(args, filter.Status)
 	}
 
-	query += " ORDER BY updated_at DESC"
+	query += " ORDER BY s.updated_at DESC"
 
 	rows, err := database.DB.Query(query, args...)
 	if err != nil {
