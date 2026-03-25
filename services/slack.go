@@ -99,6 +99,15 @@ type RateLimitInfo struct {
 	ResetTime time.Time
 }
 
+// SlackAPIError captures a structured Slack API error code.
+type SlackAPIError struct {
+	Code string
+}
+
+func (e *SlackAPIError) Error() string {
+	return fmt.Sprintf("slack api error: %s", e.Code)
+}
+
 // ExchangeCodeForToken exchanges an OAuth code for an access token
 func (c *SlackClient) ExchangeCodeForToken(clientID, clientSecret, code, redirectURI string) (*SlackOAuthResponse, error) {
 	data := url.Values{}
@@ -130,7 +139,7 @@ func (c *SlackClient) ExchangeCodeForToken(clientID, clientSecret, code, redirec
 	}
 
 	if !oauthResp.OK {
-		return nil, fmt.Errorf("slack oauth error: %s", oauthResp.Error)
+		return nil, &SlackAPIError{Code: oauthResp.Error}
 	}
 
 	return &oauthResp, nil
@@ -168,7 +177,7 @@ func (c *SlackClient) GetChannels(accessToken string) ([]SlackChannel, *RateLimi
 	}
 
 	if !channelsResp.OK {
-		return nil, rateLimit, fmt.Errorf("slack api error: %s", channelsResp.Error)
+		return nil, rateLimit, &SlackAPIError{Code: channelsResp.Error}
 	}
 
 	return channelsResp.Channels, rateLimit, nil
@@ -211,7 +220,7 @@ func (c *SlackClient) GetMessages(accessToken, channelID string, limit int, olde
 	}
 
 	if !messagesResp.OK {
-		return nil, rateLimit, fmt.Errorf("slack api error: %s", messagesResp.Error)
+		return nil, rateLimit, &SlackAPIError{Code: messagesResp.Error}
 	}
 
 	// Convert timestamps
@@ -260,7 +269,7 @@ func (c *SlackClient) GetUserInfo(accessToken, userID string) (*SlackUserRespons
 	}
 
 	if !userResp.OK {
-		return nil, rateLimit, fmt.Errorf("slack api error: %s", userResp.Error)
+		return nil, rateLimit, &SlackAPIError{Code: userResp.Error}
 	}
 
 	return &userResp, rateLimit, nil
@@ -301,7 +310,7 @@ func (c *SlackClient) MarkMessageAsRead(accessToken, channelID, timestamp string
 	}
 
 	if !result.OK {
-		return rateLimit, fmt.Errorf("slack api error: %s", result.Error)
+		return rateLimit, &SlackAPIError{Code: result.Error}
 	}
 
 	return rateLimit, nil
@@ -344,6 +353,11 @@ func (r *RateLimitInfo) WaitDuration() time.Duration {
 		return 0
 	}
 	return wait
+}
+
+func IsSlackAPIError(err error, code string) bool {
+	var apiErr *SlackAPIError
+	return errors.As(err, &apiErr) && apiErr.Code == code
 }
 
 // SlackWebhookEvent represents an incoming webhook event from Slack

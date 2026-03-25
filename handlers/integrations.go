@@ -23,19 +23,29 @@ var (
 	tokenEncryptor             *utils.TokenEncryptor
 	slackClientID              string
 	slackClientSecret          string
+	slackExchangeCodeFunc      = func(clientID, clientSecret, code, redirectURI string) (*services.SlackOAuthResponse, error) {
+		return slackClient.ExchangeCodeForToken(clientID, clientSecret, code, redirectURI)
+	}
 	githubAuthURLFunc          = services.GetGitHubAuthURL
-	githubExchangeCodeFunc = services.ExchangeGitHubCode
-	githubSaveIntegrationFunc = services.SaveGitHubIntegration
+	githubExchangeCodeFunc     = services.ExchangeGitHubCode
+	githubSaveIntegrationFunc  = services.SaveGitHubIntegration
 	githubSyncSignalsFunc      = services.SyncGitHubSignals
 )
 
 const (
 	githubOAuthStateCookieName = "github_oauth_state"
 	githubOAuthStateTTL        = 10 * time.Minute
+	slackOAuthStateTTL         = 10 * time.Minute
 )
 
 type githubOAuthStateClaims struct {
 	Email string `json:"email"`
+	jwt.RegisteredClaims
+}
+
+type slackOAuthStateClaims struct {
+	UserID      int `json:"user_id"`
+	WorkspaceID int `json:"workspace_id"`
 	jwt.RegisteredClaims
 }
 
@@ -83,7 +93,11 @@ func SlackAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state := generateState(userID, workspaceID)
+	state, err := createSlackOAuthState(userID, workspaceID, time.Now())
+	if err != nil {
+		http.Error(w, "Failed to create OAuth state", http.StatusInternalServerError)
+		return
+	}
 	redirectURI := getSlackRedirectURI(r)
 	authURL := "https://slack.com/oauth/v2/authorize?" +
 		"client_id=" + slackClientID +
@@ -114,14 +128,9 @@ func SlackCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stateCookie, err := r.Cookie("slack_oauth_state")
-	if err != nil {
-		http.Error(w, "Invalid state", http.StatusBadRequest)
-		return
-	}
-
 	state := r.URL.Query().Get("state")
-	if state != stateCookie.Value {
+	userID, workspaceID, err := validateSlackOAuthState(state)
+	if err != nil {
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
 	}
@@ -133,15 +142,9 @@ func SlackCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	redirectURI := getSlackRedirectURI(r)
-	oauthResp, err := slackClient.ExchangeCodeForToken(slackClientID, slackClientSecret, code, redirectURI)
+	oauthResp, err := slackExchangeCodeFunc(slackClientID, slackClientSecret, code, redirectURI)
 	if err != nil {
 		http.Error(w, "Failed to exchange token: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	userID, workspaceID, err := parseState(state)
-	if err != nil {
-		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
 	}
 
@@ -699,37 +702,6 @@ func getUserIDFromContext(r *http.Request) (int, error) {
 	return userID, nil
 }
 
-func generateState(userID, workspaceID int) string {
-	return strconv.Itoa(userID) + ":" + strconv.Itoa(workspaceID) + ":" + strconv.FormatInt(time.Now().Unix(), 10)
-}
-
-func parseState(state string) (userID, workspaceID int, err error) {
-	parts := make([]string, 0)
-	current := ""
-	for _, c := range state {
-		if c == ':' {
-			parts = append(parts, current)
-			current = ""
-			continue
-		}
-		current += string(c)
-	}
-	parts = append(parts, current)
-	if len(parts) < 2 {
-		return 0, 0, http.ErrNoCookie
-	}
-
-	userID, err = strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 0, err
-	}
-	workspaceID, err = strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, 0, err
-	}
-	return userID, workspaceID, nil
-}
-
 func getSlackRedirectURI(r *http.Request) string {
 	if uri := os.Getenv("SLACK_REDIRECT_URI"); uri != "" {
 		return uri
@@ -784,4 +756,45 @@ func validateGitHubOAuthState(state string) (string, error) {
 	}
 
 	return claims.Subject, nil
+}
+
+func createSlackOAuthState(userID, workspaceID int, now time.Time) (string, error) {
+	if len(utils.JwtKey) == 0 {
+		return "", http.ErrNoCookie
+	}
+
+	claims := &slackOAuthStateClaims{
+		UserID:      userID,
+		WorkspaceID: workspaceID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(now.Add(slackOAuthStateTTL)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(utils.JwtKey)
+}
+
+func validateSlackOAuthState(state string) (int, int, error) {
+	if state == "" || len(utils.JwtKey) == 0 {
+		return 0, 0, http.ErrNoCookie
+	}
+
+	claims := &slackOAuthStateClaims{}
+	token, err := jwt.ParseWithClaims(state, claims, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, http.ErrNoCookie
+		}
+		return utils.JwtKey, nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	if !token.Valid {
+		return 0, 0, http.ErrNoCookie
+	}
+
+	return claims.UserID, claims.WorkspaceID, nil
 }
