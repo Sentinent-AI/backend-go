@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -13,14 +14,30 @@ import (
 	"sentinent-backend/models"
 	"sentinent-backend/services"
 	"sentinent-backend/utils"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 var (
-	slackClient       = services.NewSlackClient()
-	tokenEncryptor    *utils.TokenEncryptor
-	slackClientID     string
-	slackClientSecret string
+	slackClient                = services.NewSlackClient()
+	tokenEncryptor             *utils.TokenEncryptor
+	slackClientID              string
+	slackClientSecret          string
+	githubAuthURLFunc          = services.GetGitHubAuthURL
+	githubExchangeCodeFunc = services.ExchangeGitHubCode
+	githubSaveIntegrationFunc = services.SaveGitHubIntegration
+	githubSyncSignalsFunc      = services.SyncGitHubSignals
 )
+
+const (
+	githubOAuthStateCookieName = "github_oauth_state"
+	githubOAuthStateTTL        = 10 * time.Minute
+)
+
+type githubOAuthStateClaims struct {
+	Email string `json:"email"`
+	jwt.RegisteredClaims
+}
 
 func InitIntegrationHandlers() error {
 	slackClientID = os.Getenv("SLACK_CLIENT_ID")
@@ -368,11 +385,27 @@ func GitHubAuthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authURL := services.GetGitHubAuthURL(email)
+	state, err := createGitHubOAuthState(email, time.Now())
+	if err != nil {
+		http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	authURL := githubAuthURLFunc(state)
 	if authURL == "" {
 		http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
 		return
 	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     githubOAuthStateCookieName,
+		Value:    state,
+		Expires:  time.Now().Add(githubOAuthStateTTL),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isProductionEnv(),
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"auth_url": authURL})
@@ -384,19 +417,36 @@ func GitHubCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stateCookie, err := r.Cookie(githubOAuthStateCookieName)
+	if err != nil {
+		http.Error(w, "Invalid state", http.StatusBadRequest)
+		return
+	}
+
+	state := r.URL.Query().Get("state")
+	if subtle.ConstantTimeCompare([]byte(state), []byte(stateCookie.Value)) != 1 {
+		http.Error(w, "Invalid state", http.StatusBadRequest)
+		return
+	}
+
+	userEmail, err := validateGitHubOAuthState(state)
+	if err != nil {
+		http.Error(w, "Invalid state", http.StatusBadRequest)
+		return
+	}
+
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		http.Error(w, "Authorization code not provided", http.StatusBadRequest)
 		return
 	}
 
-	token, err := services.ExchangeGitHubCode(code)
+	token, err := githubExchangeCodeFunc(code)
 	if err != nil {
 		http.Error(w, "Failed to exchange code: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	userEmail := r.URL.Query().Get("state")
 	var userID int
 	err = database.DB.QueryRow("SELECT id FROM users WHERE email = ?", userEmail).Scan(&userID)
 	if err != nil {
@@ -404,12 +454,26 @@ func GitHubCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := services.SaveGitHubIntegration(userID, token); err != nil {
+	if err := githubSaveIntegrationFunc(userID, token); err != nil {
 		http.Error(w, "Failed to save integration: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	go services.SyncGitHubSignals(userID)
+	http.SetCookie(w, &http.Cookie{
+		Name:     githubOAuthStateCookieName,
+		Value:    "",
+		Expires:  time.Unix(0, 0),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isProductionEnv(),
+	})
+
+	go func() {
+		if err := githubSyncSignalsFunc(userID); err != nil {
+			println("Sync error:", err.Error())
+		}
+	}()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "connected"})
@@ -679,4 +743,45 @@ func getSlackRedirectURI(r *http.Request) string {
 
 func isSlackConfigured() bool {
 	return slackClientID != "" && slackClientSecret != "" && tokenEncryptor != nil
+}
+
+func createGitHubOAuthState(email string, now time.Time) (string, error) {
+	if len(utils.JwtKey) == 0 {
+		return "", http.ErrNoCookie
+	}
+
+	claims := &githubOAuthStateClaims{
+		Email: email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   email,
+			ExpiresAt: jwt.NewNumericDate(now.Add(githubOAuthStateTTL)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(utils.JwtKey)
+}
+
+func validateGitHubOAuthState(state string) (string, error) {
+	if state == "" || len(utils.JwtKey) == 0 {
+		return "", http.ErrNoCookie
+	}
+
+	claims := &githubOAuthStateClaims{}
+	token, err := jwt.ParseWithClaims(state, claims, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, http.ErrNoCookie
+		}
+		return utils.JwtKey, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if !token.Valid || claims.Subject == "" {
+		return "", http.ErrNoCookie
+	}
+
+	return claims.Subject, nil
 }
