@@ -159,6 +159,8 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 				continue
 			}
 
+			sourceID := buildSlackSignalSourceID(channelID, msg.TS)
+
 			// Get user info for author name
 			authorName := msg.User
 			userResp, _, err := s.slackClient.GetUserInfo(accessToken, msg.User)
@@ -173,8 +175,10 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 			// Check if signal already exists
 			var existingID int
 			err = database.DB.QueryRow(
-				"SELECT id FROM signals WHERE external_id = ? AND source_type = ?",
-				msg.TS, models.SourceTypeSlack,
+				`SELECT id FROM signals
+				 WHERE user_id = ? AND source_type = ?
+				 AND (source_id = ? OR external_id = ?)`,
+				integration.UserID, models.SourceTypeSlack, sourceID, msg.TS,
 			).Scan(&existingID)
 
 			if err == sql.ErrNoRows {
@@ -183,7 +187,7 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 					`INSERT INTO signals (user_id, workspace_id, source_type, source_id, external_id, title, content, author, status, received_at)
 					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 					integration.UserID, integration.WorkspaceID, models.SourceTypeSlack,
-					channelID, msg.TS, truncate(msg.Text, 100), msg.Text, authorName,
+					sourceID, msg.TS, truncate(msg.Text, 100), msg.Text, authorName,
 					models.SignalStatusUnread, time.Unix(msg.Timestamp, 0),
 				)
 				if err != nil {
@@ -220,6 +224,10 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func buildSlackSignalSourceID(channelID, messageTS string) string {
+	return channelID + ":" + messageTS
 }
 
 // ManualSync triggers a manual sync for a specific integration
