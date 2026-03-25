@@ -58,7 +58,7 @@ func main() {
 
 	// Protected routes
 	protectedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		email, ok := r.Context().Value(middleware.UserEmailKey).(string)
+		email, ok := middleware.GetUserEmail(r.Context())
 		if !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -81,14 +81,19 @@ func main() {
 
 	// Signal routes (protected)
 	mux.Handle("/api/signals", middleware.AuthMiddleware(http.HandlerFunc(handlers.SignalsHandler)))
-	mux.Handle("/api/workspaces/", middleware.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		if strings.HasSuffix(path, "/signals") && r.Method == http.MethodGet {
-			handlers.GetSignals(w, r)
-			return
+	mux.Handle("/api/workspaces/", middleware.AuthMiddleware(http.HandlerFunc(handlers.WorkspacesRouter)))
+	mux.Handle("/api/invitations/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			handlers.ValidateInvitation(w, r)
+		case r.Method == http.MethodDelete:
+			middleware.AuthMiddleware(http.HandlerFunc(handlers.CancelInvitation)).ServeHTTP(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/accept"):
+			middleware.AuthMiddleware(http.HandlerFunc(handlers.AcceptInvitation)).ServeHTTP(w, r)
+		default:
+			http.Error(w, "Not found", http.StatusNotFound)
 		}
-		http.Error(w, "Not found", http.StatusNotFound)
-	})))
+	}))
 	mux.Handle("/api/signals/", middleware.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		switch {

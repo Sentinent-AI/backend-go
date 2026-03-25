@@ -31,6 +31,33 @@ func InitDB() {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (owner_id) REFERENCES users(id)
 		);`,
+		`CREATE TABLE IF NOT EXISTS workspace_members (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workspace_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			role TEXT NOT NULL CHECK (role IN ('owner', 'member', 'viewer')),
+			joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(workspace_id, user_id),
+			FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+			FOREIGN KEY (user_id) REFERENCES users(id)
+		);`,
+		`CREATE TABLE IF NOT EXISTS invitations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workspace_id INTEGER NOT NULL,
+			email TEXT NOT NULL,
+			token TEXT NOT NULL UNIQUE,
+			role TEXT NOT NULL CHECK (role IN ('member', 'viewer')),
+			expires_at DATETIME NOT NULL,
+			created_by INTEGER NOT NULL,
+			accepted_at DATETIME,
+			accepted_by INTEGER,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+			FOREIGN KEY (created_by) REFERENCES users(id),
+			FOREIGN KEY (accepted_by) REFERENCES users(id)
+		);`,
 		`CREATE TABLE IF NOT EXISTS external_integrations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL,
@@ -83,6 +110,10 @@ func InitDB() {
 		`CREATE INDEX IF NOT EXISTS idx_signals_received_at ON signals(received_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_integrations_user_id ON external_integrations(user_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_integrations_workspace_id ON external_integrations(workspace_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_members_workspace_id ON workspace_members(workspace_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_members_user_id ON workspace_members(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_invitations_workspace_id ON invitations(workspace_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_invitations_email ON invitations(email);`,
 	}
 
 	for _, statement := range statements {
@@ -105,6 +136,8 @@ func InitDB() {
 	ensureColumn("signals", "source_metadata", "TEXT")
 	ensureColumn("signals", "received_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
 	ensureColumn("signals", "updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
+
+	ensureWorkspaceOwnerMemberships()
 }
 
 func ensureColumn(tableName, columnName, columnDefinition string) {
@@ -138,6 +171,33 @@ func ensureColumn(tableName, columnName, columnDefinition string) {
 		columnDefinition,
 	)
 	if _, err := DB.Exec(statement); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func ensureWorkspaceOwnerMemberships() {
+	if _, err := DB.Exec(`
+		INSERT INTO workspace_members (workspace_id, user_id, role)
+		SELECT w.id, w.owner_id, 'owner'
+		FROM workspaces w
+		ON CONFLICT(workspace_id, user_id) DO UPDATE SET
+			role = excluded.role,
+			updated_at = CURRENT_TIMESTAMP
+	`); err != nil {
+		log.Fatal(err)
+	}
+
+	if _, err := DB.Exec(`
+		UPDATE workspace_members
+		SET role = 'member', updated_at = CURRENT_TIMESTAMP
+		WHERE role = 'owner'
+		  AND EXISTS (
+			  SELECT 1
+			  FROM workspaces w
+			  WHERE w.id = workspace_members.workspace_id
+			    AND w.owner_id <> workspace_members.user_id
+		  )
+	`); err != nil {
 		log.Fatal(err)
 	}
 }
