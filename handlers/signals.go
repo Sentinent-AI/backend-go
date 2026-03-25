@@ -126,10 +126,27 @@ func GetSignals(w http.ResponseWriter, r *http.Request) {
 	// Get total count
 	countQuery := "SELECT COUNT(*) FROM signals WHERE workspace_id = ? AND user_id = ?"
 	countArgs := []interface{}{workspaceID, userID}
+	if filter.Status != "" {
+		countQuery = `
+			SELECT COUNT(*)
+			FROM signals s
+			LEFT JOIN signal_status ss ON s.id = ss.signal_id AND ss.user_id = ?
+			WHERE s.workspace_id = ? AND s.user_id = ?`
+		countArgs = []interface{}{userID, workspaceID, userID}
+	}
 
 	if filter.SourceType != "" {
-		countQuery += " AND source_type = ?"
+		if filter.Status != "" {
+			countQuery += " AND s.source_type = ?"
+		} else {
+			countQuery += " AND source_type = ?"
+		}
 		countArgs = append(countArgs, filter.SourceType)
+	}
+
+	if filter.Status != "" {
+		countQuery += " AND COALESCE(ss.status, s.status) = ?"
+		countArgs = append(countArgs, filter.Status)
 	}
 
 	var total int
