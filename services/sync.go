@@ -198,8 +198,8 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 			}
 		}
 
-		// Respect rate limits
-		if rateLimit != nil && rateLimit.Remaining < 5 {
+		// Respect rate limits only when Slack actually returned limit metadata.
+		if rateLimit != nil && rateLimit.Limit > 0 && rateLimit.Remaining < 5 {
 			time.Sleep(time.Duration(60/rateLimit.Limit) * time.Second)
 		}
 	}
