@@ -200,12 +200,24 @@ func ensureColumn(tableName, columnName, columnDefinition string) {
 
 func ensureWorkspaceOwnerMemberships() {
 	if _, err := DB.Exec(`
-		INSERT INTO workspace_members (workspace_id, user_id, role)
-		SELECT w.id, w.owner_id, 'owner'
+		INSERT INTO workspace_members (workspace_id, user_id, role, updated_at)
+		SELECT w.id, w.owner_id, 'owner', CURRENT_TIMESTAMP
 		FROM workspaces w
-		ON CONFLICT(workspace_id, user_id) DO UPDATE SET
-			role = excluded.role,
-			updated_at = CURRENT_TIMESTAMP
+		WHERE NOT EXISTS (
+			SELECT 1 FROM workspace_members wm 
+			WHERE wm.workspace_id = w.id AND wm.user_id = w.owner_id
+		)
+	`); err != nil {
+		log.Fatal(err)
+	}
+
+	if _, err := DB.Exec(`
+		UPDATE workspace_members SET role = 'owner', updated_at = CURRENT_TIMESTAMP
+		WHERE workspace_id IN (
+			SELECT w.id FROM workspaces w
+			WHERE w.owner_id = workspace_members.user_id
+		)
+		AND role != 'owner'
 	`); err != nil {
 		log.Fatal(err)
 	}
