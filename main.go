@@ -81,6 +81,7 @@ func main() {
 
 	// Signal routes (protected)
 	mux.Handle("/api/signals", middleware.AuthMiddleware(http.HandlerFunc(handlers.SignalsHandler)))
+	mux.Handle("/api/workspaces", middleware.AuthMiddleware(http.HandlerFunc(handlers.WorkspacesRouter)))
 	mux.Handle("/api/workspaces/", middleware.AuthMiddleware(http.HandlerFunc(handlers.WorkspacesRouter)))
 	mux.Handle("/api/invitations/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

@@ -25,6 +25,7 @@ type InvitationResponse struct {
 	ID          int                 `json:"id"`
 	WorkspaceID int                 `json:"workspace_id"`
 	Email       string              `json:"email"`
+	Token       string              `json:"token,omitempty"`
 	Role        WorkspaceMemberRole `json:"role"`
 	ExpiresAt   time.Time           `json:"expires_at"`
 	CreatedAt   time.Time           `json:"created_at"`
