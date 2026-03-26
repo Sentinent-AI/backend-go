@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"sentinent-backend/database"
 	"sentinent-backend/models"
@@ -16,6 +17,25 @@ type contextKey string
 
 const UserEmailKey contextKey = "userEmail"
 const UserIDKey contextKey = "userID"
+
+var jwtMalformedErrors = []error{
+	jwt.ErrTokenMalformed,
+	jwt.ErrTokenNotValidYet,
+	jwt.ErrSignatureInvalid,
+	jwt.ErrHashUnavailable,
+}
+
+func isMalformedTokenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	for _, malformedErr := range jwtMalformedErrors {
+		if errors.Is(err, malformedErr) {
+			return true
+		}
+	}
+	return false
+}
 
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -49,7 +69,11 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		})
 
 		if err != nil {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			if isMalformedTokenError(err) {
+				http.Error(w, "Bad Request", http.StatusBadRequest)
+			} else {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			}
 			return
 		}
 
