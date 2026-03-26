@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"context"
 	"net/http"
 	"net/url"
 	"os"
@@ -102,7 +103,7 @@ func ExchangeGitHubCode(code string) (*oauth2.Token, error) {
 	if githubOAuthConfig == nil {
 		return nil, fmt.Errorf("GitHub OAuth not initialized")
 	}
-	return githubOAuthConfig.Exchange(oauth2.NoContext, code)
+	return githubOAuthConfig.Exchange(context.Background(), code)
 }
 
 // EncryptToken encrypts a token using AES-GCM
@@ -264,7 +265,7 @@ func GetGitHubClient(userID int) (*http.Client, error) {
 		AccessToken: accessToken,
 	}
 
-	return oauth2.NewClient(oauth2.NoContext, oauth2.StaticTokenSource(token)), nil
+	return oauth2.NewClient(context.Background(), oauth2.StaticTokenSource(token)), nil
 }
 
 // FetchAssignedIssues fetches issues assigned to the user
@@ -308,16 +309,18 @@ func fetchGitHubIssues(client *http.Client, endpoint string, params map[string]s
 		if err != nil {
 			return nil, err
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
 			return nil, fmt.Errorf("GitHub API error: %d - %s", resp.StatusCode, string(body))
 		}
 
 		var issues []GitHubIssue
-		if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
-			return nil, err
+		decodeErr := json.NewDecoder(resp.Body).Decode(&issues)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return nil, decodeErr
 		}
 
 		if len(issues) == 0 {
@@ -470,7 +473,7 @@ func GetUserSignals(userID int, filter *models.SignalFilter) ([]models.Signal, e
 	}
 	defer rows.Close()
 
-	var signals []models.Signal
+	signals := make([]models.Signal, 0)
 	for rows.Next() {
 		var signal models.Signal
 		var workspaceID sql.NullInt64

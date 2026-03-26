@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -479,7 +480,7 @@ func GitHubCallbackHandler(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		if err := githubSyncSignalsFunc(userID); err != nil {
-			println("Sync error:", err.Error())
+			log.Printf("Sync error: %v", err)
 		}
 	}()
 
@@ -528,7 +529,7 @@ func GitHubSyncHandler(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		if err := services.SyncGitHubSignals(userID); err != nil {
-			println("Sync error:", err.Error())
+			log.Printf("Sync error: %v", err)
 		}
 	}()
 
@@ -613,14 +614,17 @@ func GitHubWebhookHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleIssuesWebhook(payload map[string]interface{}) {
-	if _, ok := payload["issue"].(map[string]interface{}); !ok {
+	issue, ok := payload["issue"].(map[string]interface{})
+	if !ok {
 		return
 	}
 
 	action, _ := payload["action"].(string)
-	if action == "opened" || action == "closed" || action == "reopened" || action == "edited" {
+	if action != "opened" && action != "closed" && action != "reopened" && action != "edited" {
 		return
 	}
+
+	_ = issue
 }
 
 func handlePullRequestWebhook(payload map[string]interface{}) {
