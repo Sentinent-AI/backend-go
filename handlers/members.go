@@ -12,18 +12,40 @@ import (
 
 func WorkspacesRouter(w http.ResponseWriter, r *http.Request) {
 	parts := splitPath(r.URL.Path)
-	if len(parts) < 4 || parts[0] != "api" || parts[1] != "workspaces" {
+	if len(parts) < 2 || parts[0] != "api" || parts[1] != "workspaces" {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 
 	switch {
+	case len(parts) == 2 && r.Method == http.MethodGet:
+		ListWorkspaces(w, r)
+	case len(parts) == 2 && r.Method == http.MethodPost:
+		CreateWorkspace(w, r)
+	case len(parts) == 3 && r.Method == http.MethodGet:
+		GetWorkspace(w, r)
+	case len(parts) == 3 && r.Method == http.MethodPatch:
+		UpdateWorkspace(w, r)
+	case len(parts) == 3 && r.Method == http.MethodDelete:
+		DeleteWorkspace(w, r)
+	case len(parts) == 4 && parts[3] == "decisions" && r.Method == http.MethodGet:
+		ListDecisions(w, r)
+	case len(parts) == 4 && parts[3] == "decisions" && r.Method == http.MethodPost:
+		CreateDecision(w, r)
+	case len(parts) == 5 && parts[3] == "decisions" && r.Method == http.MethodGet:
+		GetDecision(w, r)
+	case len(parts) == 5 && parts[3] == "decisions" && r.Method == http.MethodPatch:
+		UpdateDecision(w, r)
+	case len(parts) == 5 && parts[3] == "decisions" && r.Method == http.MethodDelete:
+		DeleteDecision(w, r)
 	case len(parts) == 4 && parts[3] == "signals" && r.Method == http.MethodGet:
 		GetSignals(w, r)
 	case len(parts) == 4 && parts[3] == "invitations" && r.Method == http.MethodPost:
 		CreateInvitation(w, r)
 	case len(parts) == 4 && parts[3] == "invitations" && r.Method == http.MethodGet:
 		ListInvitations(w, r)
+	case len(parts) == 5 && parts[3] == "invitations" && r.Method == http.MethodDelete:
+		CancelInvitation(w, r)
 	case len(parts) == 4 && parts[3] == "members" && r.Method == http.MethodGet:
 		ListMembers(w, r)
 	case len(parts) == 5 && parts[3] == "members" && r.Method == http.MethodPatch:

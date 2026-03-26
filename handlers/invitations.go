@@ -117,6 +117,7 @@ func CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		ID:          int(invitationID),
 		WorkspaceID: workspaceID,
 		Email:       req.Email,
+		Token:       token,
 		Role:        req.Role,
 		ExpiresAt:   expiresAt,
 		CreatedAt:   time.Now(),
@@ -156,7 +157,7 @@ func ListInvitations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := database.DB.Query(
-		`SELECT id, workspace_id, email, role, expires_at, created_by, created_at, updated_at
+		`SELECT id, workspace_id, email, token, role, expires_at, created_by, created_at, updated_at
 		 FROM invitations
 		 WHERE workspace_id = ? AND accepted_at IS NULL AND expires_at > ?
 		 ORDER BY created_at DESC`,
@@ -175,6 +176,7 @@ func ListInvitations(w http.ResponseWriter, r *http.Request) {
 			&invitation.ID,
 			&invitation.WorkspaceID,
 			&invitation.Email,
+			&invitation.Token,
 			&invitation.Role,
 			&invitation.ExpiresAt,
 			&invitation.CreatedBy,
@@ -204,8 +206,9 @@ func ValidateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var invitation models.Invitation
+	var createdBy int
 	err := database.DB.QueryRow(
-		`SELECT id, workspace_id, email, role, expires_at, created_at
+		`SELECT id, workspace_id, email, role, expires_at, created_at, created_by
 		 FROM invitations
 		 WHERE token = ? AND accepted_at IS NULL`,
 		token,
@@ -216,6 +219,7 @@ func ValidateInvitation(w http.ResponseWriter, r *http.Request) {
 		&invitation.Role,
 		&invitation.ExpiresAt,
 		&invitation.CreatedAt,
+		&createdBy,
 	)
 	if err != nil {
 		http.Error(w, "Invalid or expired invitation", http.StatusNotFound)
@@ -233,13 +237,23 @@ func ValidateInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var invitedByEmail string
+	if err := database.DB.QueryRow("SELECT email FROM users WHERE id = ?", createdBy).Scan(&invitedByEmail); err != nil {
+		http.Error(w, "Invitation owner not found", http.StatusNotFound)
+		return
+	}
+
 	response := map[string]interface{}{
-		"id":             invitation.ID,
-		"workspace_id":   invitation.WorkspaceID,
-		"workspace_name": workspaceName,
-		"email":          invitation.Email,
-		"role":           invitation.Role,
-		"expires_at":     invitation.ExpiresAt,
+		"valid": true,
+		"workspace": map[string]interface{}{
+			"id":   invitation.WorkspaceID,
+			"name": workspaceName,
+		},
+		"invited_by": map[string]string{
+			"email": invitedByEmail,
+		},
+		"role":       invitation.Role,
+		"expires_at": invitation.ExpiresAt,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -330,9 +344,9 @@ func AcceptInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"message": "Invitation accepted successfully",
-		"role":    string(invitation.Role),
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"workspace_id": invitation.WorkspaceID,
+		"role":         invitation.Role,
 	})
 }
 
@@ -396,7 +410,7 @@ func generateSecureToken() (string, error) {
 
 func extractWorkspaceIDFromPath(path string) (int, error) {
 	parts := splitPath(path)
-	if len(parts) >= 4 && parts[0] == "api" && parts[1] == "workspaces" {
+	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "workspaces" {
 		return strconv.Atoi(parts[2])
 	}
 	return 0, strconv.ErrSyntax
@@ -414,6 +428,9 @@ func extractInvitationIDFromPath(path string) (int, error) {
 	parts := splitPath(path)
 	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "invitations" {
 		return strconv.Atoi(parts[2])
+	}
+	if len(parts) >= 5 && parts[0] == "api" && parts[1] == "workspaces" && parts[3] == "invitations" {
+		return strconv.Atoi(parts[4])
 	}
 	return 0, strconv.ErrSyntax
 }
