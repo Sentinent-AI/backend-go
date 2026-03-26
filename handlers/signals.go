@@ -103,7 +103,7 @@ func GetSignals(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var signals []models.Signal
+	signals := make([]models.Signal, 0)
 	for rows.Next() {
 		var s models.Signal
 		var content sql.NullString

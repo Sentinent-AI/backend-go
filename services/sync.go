@@ -81,12 +81,16 @@ func (s *SyncService) syncAllIntegrations() {
 	for rows.Next() {
 		var integration models.ExternalIntegration
 		var encryptedToken string
+		var workspaceID sql.NullInt64
 		err := rows.Scan(
-			&integration.ID, &integration.UserID, &integration.WorkspaceID,
+			&integration.ID, &integration.UserID, &workspaceID,
 			&integration.Provider, &encryptedToken, &integration.Metadata,
 		)
 		if err != nil {
 			continue
+		}
+		if workspaceID.Valid {
+			integration.WorkspaceID = int(workspaceID.Int64)
 		}
 		records = append(records, syncRecord{
 			integration:    integration,
@@ -265,13 +269,17 @@ func buildSlackSignalSourceID(channelID, messageTS string) string {
 func (s *SyncService) ManualSync(integrationID int) error {
 	var integration models.ExternalIntegration
 	var encryptedToken string
+	var workspaceID sql.NullInt64
 	err := database.DB.QueryRow(
 		"SELECT id, user_id, workspace_id, provider, access_token, metadata FROM external_integrations WHERE id = ?",
 		integrationID,
 	).Scan(
-		&integration.ID, &integration.UserID, &integration.WorkspaceID,
+		&integration.ID, &integration.UserID, &workspaceID,
 		&integration.Provider, &encryptedToken, &integration.Metadata,
 	)
+	if workspaceID.Valid {
+		integration.WorkspaceID = int(workspaceID.Int64)
+	}
 	if err != nil {
 		return err
 	}

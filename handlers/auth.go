@@ -15,8 +15,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var JwtKey []byte // Deprecated: use utils.JwtKey instead
-
 func Signup(w http.ResponseWriter, r *http.Request) {
 	var user models.User
 	err := json.NewDecoder(r.Body).Decode(&user)
