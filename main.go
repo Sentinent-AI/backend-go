@@ -126,9 +126,16 @@ func main() {
 	// Webhook routes (public, but should verify signature in production)
 	mux.HandleFunc("/api/webhooks/github", handlers.GitHubWebhookHandler)
 
-	// Apply CORS middleware to the entire mux
-	handler := middleware.CorsMiddleware(mux)
+	// Apply CORS and logging middleware
+	handler := loggingMiddleware(middleware.CorsMiddleware(mux))
 
 	log.Println("Server started on :8080")
 	log.Fatal(http.ListenAndServe(":8080", handler))
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s %s", r.RemoteAddr, r.Method, r.URL.Path)
+		next.ServeHTTP(w, r)
+	})
 }
