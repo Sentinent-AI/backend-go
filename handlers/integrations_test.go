@@ -191,6 +191,25 @@ func TestGitHubAuthHandlerSetsSignedStateCookie(t *testing.T) {
 	setupTestDB()
 	defer database.DB.Close()
 
+	if _, err := database.DB.Exec(
+		"INSERT INTO users (id, email, password) VALUES (?, ?, ?)",
+		1, "octo@example.com", "hashed-password",
+	); err != nil {
+		t.Fatalf("failed to seed user: %v", err)
+	}
+	if _, err := database.DB.Exec(
+		"INSERT INTO workspaces (id, name, owner_id) VALUES (?, ?, ?)",
+		7, "GitHub", 1,
+	); err != nil {
+		t.Fatalf("failed to seed workspace: %v", err)
+	}
+	if _, err := database.DB.Exec(
+		"INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)",
+		7, 1, models.RoleOwner,
+	); err != nil {
+		t.Fatalf("failed to seed workspace membership: %v", err)
+	}
+
 	originalGitHubAuthURLFunc := githubAuthURLFunc
 	t.Cleanup(func() {
 		githubAuthURLFunc = originalGitHubAuthURLFunc
@@ -202,7 +221,11 @@ func TestGitHubAuthHandlerSetsSignedStateCookie(t *testing.T) {
 		return "https://github.com/login/oauth/authorize?state=" + url.QueryEscape(state)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/integrations/github/auth", nil)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/integrations/github/auth?workspace_id=7&redirect_url="+url.QueryEscape("http://localhost:4200/workspaces/7/settings/integrations"),
+		nil,
+	)
 	req = req.WithContext(context.WithValue(req.Context(), middleware.UserEmailKey, "octo@example.com"))
 	rr := httptest.NewRecorder()
 
@@ -215,12 +238,18 @@ func TestGitHubAuthHandlerSetsSignedStateCookie(t *testing.T) {
 		t.Fatal("expected GitHub auth URL to receive a state value")
 	}
 
-	email, err := validateGitHubOAuthState(capturedState)
+	email, workspaceID, redirectURL, err := validateGitHubOAuthState(capturedState)
 	if err != nil {
 		t.Fatalf("expected signed state to validate: %v", err)
 	}
 	if email != "octo@example.com" {
 		t.Fatalf("expected state to be bound to octo@example.com, got %q", email)
+	}
+	if workspaceID != 7 {
+		t.Fatalf("expected workspace id 7 in state, got %d", workspaceID)
+	}
+	if redirectURL != "http://localhost:4200/workspaces/7/settings/integrations" {
+		t.Fatalf("unexpected redirect URL in state: %q", redirectURL)
 	}
 
 	var stateCookie *http.Cookie
@@ -270,7 +299,7 @@ func TestGitHubCallbackHandlerRejectsTamperedState(t *testing.T) {
 	setupTestDB()
 	defer database.DB.Close()
 
-	state, err := createGitHubOAuthState("octo@example.com", time.Now())
+	state, err := createGitHubOAuthState("octo@example.com", 7, "", time.Now())
 	if err != nil {
 		t.Fatalf("failed to create state: %v", err)
 	}
@@ -290,12 +319,12 @@ func TestValidateGitHubOAuthStateRejectsExpiredState(t *testing.T) {
 	setupTestDB()
 	defer database.DB.Close()
 
-	state, err := createGitHubOAuthState("octo@example.com", time.Now().Add(-githubOAuthStateTTL-time.Minute))
+	state, err := createGitHubOAuthState("octo@example.com", 7, "", time.Now().Add(-githubOAuthStateTTL-time.Minute))
 	if err != nil {
 		t.Fatalf("failed to create expired state: %v", err)
 	}
 
-	if _, err := validateGitHubOAuthState(state); err == nil {
+	if _, _, _, err := validateGitHubOAuthState(state); err == nil {
 		t.Fatal("expected expired state to be rejected")
 	}
 }
@@ -305,10 +334,22 @@ func TestGitHubCallbackHandlerAcceptsValidState(t *testing.T) {
 	defer database.DB.Close()
 
 	if _, err := database.DB.Exec(
-		"INSERT INTO users (email, password) VALUES (?, ?)",
-		"octo@example.com", "hashed-password",
+		"INSERT INTO users (id, email, password) VALUES (?, ?, ?)",
+		1, "octo@example.com", "hashed-password",
 	); err != nil {
 		t.Fatalf("failed to seed user: %v", err)
+	}
+	if _, err := database.DB.Exec(
+		"INSERT INTO workspaces (id, name, owner_id) VALUES (?, ?, ?)",
+		7, "GitHub", 1,
+	); err != nil {
+		t.Fatalf("failed to seed workspace: %v", err)
+	}
+	if _, err := database.DB.Exec(
+		"INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)",
+		7, 1, models.RoleOwner,
+	); err != nil {
+		t.Fatalf("failed to seed workspace membership: %v", err)
 	}
 
 	originalGitHubExchangeCodeFunc := githubExchangeCodeFunc
@@ -328,21 +369,27 @@ func TestGitHubCallbackHandlerAcceptsValidState(t *testing.T) {
 	}
 
 	var savedUserID int
-	githubSaveIntegrationFunc = func(userID int, token *oauth2.Token) error {
+	var savedWorkspaceID int
+	githubSaveIntegrationFunc = func(userID, workspaceID int, token *oauth2.Token) error {
 		savedUserID = userID
+		savedWorkspaceID = workspaceID
 		if token.AccessToken != "test-token" {
 			t.Fatalf("expected access token test-token, got %q", token.AccessToken)
 		}
 		return nil
 	}
 
-	syncUserIDs := make(chan int, 1)
-	githubSyncSignalsFunc = func(userID int) error {
-		syncUserIDs <- userID
+	type syncInvocation struct {
+		userID      int
+		workspaceID int
+	}
+	syncCalls := make(chan syncInvocation, 1)
+	githubSyncSignalsFunc = func(userID, workspaceID int) error {
+		syncCalls <- syncInvocation{userID: userID, workspaceID: workspaceID}
 		return nil
 	}
 
-	state, err := createGitHubOAuthState("octo@example.com", time.Now())
+	state, err := createGitHubOAuthState("octo@example.com", 7, "", time.Now())
 	if err != nil {
 		t.Fatalf("failed to create state: %v", err)
 	}
@@ -359,11 +406,17 @@ func TestGitHubCallbackHandlerAcceptsValidState(t *testing.T) {
 	if savedUserID == 0 {
 		t.Fatal("expected integration save to use a real user ID")
 	}
+	if savedWorkspaceID != 7 {
+		t.Fatalf("expected integration save to use workspace 7, got %d", savedWorkspaceID)
+	}
 
 	select {
-	case syncedUserID := <-syncUserIDs:
-		if syncedUserID != savedUserID {
-			t.Fatalf("expected sync user ID %d, got %d", savedUserID, syncedUserID)
+	case syncCall := <-syncCalls:
+		if syncCall.userID != savedUserID {
+			t.Fatalf("expected sync user ID %d, got %d", savedUserID, syncCall.userID)
+		}
+		if syncCall.workspaceID != 7 {
+			t.Fatalf("expected sync workspace ID 7, got %d", syncCall.workspaceID)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("expected GitHub sync to be triggered")
@@ -569,6 +622,23 @@ func setupIntegrationsTestDB(t *testing.T) {
 	); err != nil {
 		t.Fatalf("failed to seed secondary integration user: %v", err)
 	}
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO workspaces (id, name, owner_id) VALUES
+			(9, 'Operations', 1),
+			(10, 'Engineering', 2)`,
+	); err != nil {
+		t.Fatalf("failed to seed workspaces: %v", err)
+	}
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES
+			(9, 1, 'owner'),
+			(10, 1, 'viewer'),
+			(10, 2, 'owner')`,
+	); err != nil {
+		t.Fatalf("failed to seed workspace memberships: %v", err)
+	}
 }
 
 func integrationRequestWithUser(method, target, email string) *http.Request {
@@ -585,9 +655,10 @@ func TestGetIntegrationsFiltersByWorkspaceAndIncludesGlobalIntegrations(t *testi
 			(id, user_id, workspace_id, provider, access_token, metadata)
 		 VALUES
 			(1, 1, 9, 'slack', 'token-1', '{"team":"workspace-9"}'),
-			(2, 1, NULL, 'github', 'token-2', '{"scope":"global"}'),
-			(3, 1, 10, 'slack', 'token-3', '{"team":"workspace-10"}'),
-			(4, 2, 9, 'slack', 'token-4', '{"team":"other-user"}')`,
+			(2, 1, 9, 'github', 'token-2', '{"scope":"workspace"}'),
+			(3, 1, NULL, 'gmail', 'token-3', '{"email":"mailbox@example.com"}'),
+			(4, 1, 10, 'slack', 'token-4', '{"team":"workspace-10"}'),
+			(5, 2, 9, 'slack', 'token-5', '{"team":"other-user"}')`,
 	); err != nil {
 		t.Fatalf("failed to seed integrations: %v", err)
 	}
@@ -606,22 +677,25 @@ func TestGetIntegrationsFiltersByWorkspaceAndIncludesGlobalIntegrations(t *testi
 		t.Fatalf("failed to decode integrations response: %v", err)
 	}
 
-	if len(integrations) != 2 {
-		t.Fatalf("expected 2 integrations, got %d", len(integrations))
+	if len(integrations) != 3 {
+		t.Fatalf("expected 3 integrations, got %d", len(integrations))
 	}
 
-	var workspaceScoped, globalScoped bool
+	var slackScoped, githubScoped, gmailGlobal bool
 	for _, integration := range integrations {
 		if integration.Provider == "slack" && integration.WorkspaceID == 9 {
-			workspaceScoped = true
+			slackScoped = true
 		}
-		if integration.Provider == "github" && integration.Metadata == `{"scope":"global"}` {
-			globalScoped = true
+		if integration.Provider == "github" && integration.WorkspaceID == 9 {
+			githubScoped = true
+		}
+		if integration.Provider == "gmail" && integration.Metadata == `{"email":"mailbox@example.com"}` {
+			gmailGlobal = true
 		}
 	}
 
-	if !workspaceScoped || !globalScoped {
-		t.Fatalf("expected one workspace-scoped and one global integration, got %+v", integrations)
+	if !slackScoped || !githubScoped || !gmailGlobal {
+		t.Fatalf("expected workspace-scoped slack/github integrations and one global gmail integration, got %+v", integrations)
 	}
 }
 
@@ -686,7 +760,7 @@ func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
 			(id, user_id, workspace_id, provider, access_token, metadata)
 		 VALUES
 			(7, 1, 9, 'slack', 'token-7', '{"team":"workspace-9"}'),
-			(8, 1, NULL, 'github', 'token-8', '{"scope":"global"}'),
+			(8, 1, 9, 'github', 'token-8', '{"scope":"workspace"}'),
 			(9, 1, NULL, 'gmail', 'token-9', '{"email":"mailbox@example.com"}')`,
 	); err != nil {
 		t.Fatalf("failed to seed integration statuses: %v", err)

@@ -50,6 +50,35 @@ func setupTestDB() {
 		panic(err)
 	}
 
+	workspaceTable := `
+	CREATE TABLE IF NOT EXISTS workspaces (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		description TEXT DEFAULT '',
+		owner_id INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
+	_, err = database.DB.Exec(workspaceTable)
+	if err != nil {
+		panic(err)
+	}
+
+	workspaceMembersTable := `
+	CREATE TABLE IF NOT EXISTS workspace_members (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		workspace_id INTEGER NOT NULL,
+		user_id INTEGER NOT NULL,
+		role TEXT NOT NULL,
+		joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(workspace_id, user_id)
+	);`
+	_, err = database.DB.Exec(workspaceMembersTable)
+	if err != nil {
+		panic(err)
+	}
+
 	utils.JwtKey = []byte("test-jwt-secret")
 }
 
