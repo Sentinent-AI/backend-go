@@ -1,13 +1,17 @@
 package handlers
 
 import (
+	"context"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"sentinent-backend/database"
@@ -17,6 +21,7 @@ import (
 	"sentinent-backend/utils"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/oauth2"
 )
 
 var (
@@ -24,6 +29,8 @@ var (
 	tokenEncryptor        *utils.TokenEncryptor
 	slackClientID         string
 	slackClientSecret     string
+	gmailClientID         string
+	gmailClientSecret     string
 	slackExchangeCodeFunc = func(clientID, clientSecret, code, redirectURI string) (*services.SlackOAuthResponse, error) {
 		return slackClient.ExchangeCodeForToken(clientID, clientSecret, code, redirectURI)
 	}
@@ -31,11 +38,15 @@ var (
 	githubExchangeCodeFunc    = services.ExchangeGitHubCode
 	githubSaveIntegrationFunc = services.SaveGitHubIntegration
 	githubSyncSignalsFunc     = services.SyncGitHubSignals
+	gmailExchangeCodeFunc     = exchangeGmailCode
+	gmailFetchProfileFunc     = fetchGmailProfile
 )
 
 const (
 	githubOAuthStateCookieName = "github_oauth_state"
+	gmailOAuthStateCookieName  = "gmail_oauth_state"
 	githubOAuthStateTTL        = 10 * time.Minute
+	gmailOAuthStateTTL         = 10 * time.Minute
 	slackOAuthStateTTL         = 10 * time.Minute
 )
 
@@ -50,11 +61,26 @@ type slackOAuthStateClaims struct {
 	jwt.RegisteredClaims
 }
 
+type gmailOAuthStateClaims struct {
+	Email       string `json:"email"`
+	RedirectURL string `json:"redirect_url,omitempty"`
+	jwt.RegisteredClaims
+}
+
+type gmailProfile struct {
+	Email         string `json:"email"`
+	Name          string `json:"name"`
+	VerifiedEmail bool   `json:"verified_email"`
+}
+
 func InitIntegrationHandlers() error {
 	slackClientID = os.Getenv("SLACK_CLIENT_ID")
 	slackClientSecret = os.Getenv("SLACK_CLIENT_SECRET")
+	gmailClientID = strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID"))
+	gmailClientSecret = strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_SECRET"))
 
-	if slackClientID == "" || slackClientSecret == "" {
+	needsTokenEncryptor := (slackClientID != "" && slackClientSecret != "") || (gmailClientID != "" && gmailClientSecret != "")
+	if !needsTokenEncryptor {
 		return nil
 	}
 
@@ -382,6 +408,131 @@ func GetSlackChannels(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"channels": channels})
 }
 
+func GmailAuthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isGmailConfigured() {
+		http.Error(w, "Gmail integration not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	email, ok := middleware.GetUserEmail(r.Context())
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	redirectURL := sanitizeRedirectURL(r.URL.Query().Get("redirect_url"))
+	state, err := createGmailOAuthState(email, redirectURL, time.Now())
+	if err != nil {
+		http.Error(w, "Gmail integration not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	authURL := buildGmailAuthURL(state, getGmailRedirectURI(r))
+	http.SetCookie(w, &http.Cookie{
+		Name:     gmailOAuthStateCookieName,
+		Value:    state,
+		Expires:  time.Now().Add(gmailOAuthStateTTL),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isProductionEnv(),
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"auth_url": authURL})
+}
+
+func GmailCallbackHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	stateCookie, err := r.Cookie(gmailOAuthStateCookieName)
+	if err != nil {
+		http.Error(w, "Invalid state", http.StatusBadRequest)
+		return
+	}
+
+	state := r.URL.Query().Get("state")
+	if subtle.ConstantTimeCompare([]byte(state), []byte(stateCookie.Value)) != 1 {
+		http.Error(w, "Invalid state", http.StatusBadRequest)
+		return
+	}
+
+	userEmail, redirectURL, err := validateGmailOAuthState(state)
+	if err != nil {
+		http.Error(w, "Invalid state", http.StatusBadRequest)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "gmail", "failed") {
+			return
+		}
+		http.Error(w, "Authorization code not provided", http.StatusBadRequest)
+		return
+	}
+
+	token, err := gmailExchangeCodeFunc(code, getGmailRedirectURI(r))
+	if err != nil {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "gmail", "failed") {
+			return
+		}
+		http.Error(w, "Failed to exchange code: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	profile, err := gmailFetchProfileFunc(token)
+	if err != nil {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "gmail", "failed") {
+			return
+		}
+		http.Error(w, "Failed to fetch Gmail profile: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var userID int
+	err = database.DB.QueryRow("SELECT id FROM users WHERE email = ?", userEmail).Scan(&userID)
+	if err != nil {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "gmail", "failed") {
+			return
+		}
+		http.Error(w, "User not found", http.StatusUnauthorized)
+		return
+	}
+
+	if err := saveGmailIntegration(userID, token, profile); err != nil {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "gmail", "failed") {
+			return
+		}
+		http.Error(w, "Failed to save integration: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     gmailOAuthStateCookieName,
+		Value:    "",
+		Expires:  time.Unix(0, 0),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isProductionEnv(),
+	})
+
+	if redirectOAuthResultIfPossible(w, r, redirectURL, "gmail", "connected") {
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "connected"})
+}
+
 func GitHubAuthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -558,6 +709,30 @@ func GitHubDisconnectHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "disconnected"})
 }
 
+func GmailDisconnectHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if _, err := database.DB.Exec(
+		"DELETE FROM external_integrations WHERE user_id = ? AND provider = 'gmail' AND workspace_id IS NULL",
+		userID,
+	); err != nil {
+		http.Error(w, "Failed to disconnect Gmail", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "disconnected"})
+}
+
 func SignalsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -664,6 +839,7 @@ func IntegrationStatusHandler(w http.ResponseWriter, r *http.Request) {
 	statuses := []models.IntegrationStatus{
 		buildIntegrationStatus(userID, "slack", isSlackConfigured(), workspaceID),
 		buildIntegrationStatus(userID, "github", services.IsGitHubConfigured(), nil),
+		buildIntegrationStatus(userID, "gmail", isGmailConfigured(), nil),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -853,6 +1029,21 @@ func isSlackConfigured() bool {
 	return slackClientID != "" && slackClientSecret != "" && tokenEncryptor != nil
 }
 
+func getGmailRedirectURI(r *http.Request) string {
+	if uri := strings.TrimSpace(os.Getenv("GOOGLE_REDIRECT_URI")); uri != "" {
+		return uri
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host + "/api/integrations/gmail/callback"
+}
+
+func isGmailConfigured() bool {
+	return gmailClientID != "" && gmailClientSecret != "" && tokenEncryptor != nil
+}
+
 func createGitHubOAuthState(email string, now time.Time) (string, error) {
 	if len(utils.JwtKey) == 0 {
 		return "", http.ErrNoCookie
@@ -894,6 +1085,48 @@ func validateGitHubOAuthState(state string) (string, error) {
 	return claims.Subject, nil
 }
 
+func createGmailOAuthState(email, redirectURL string, now time.Time) (string, error) {
+	if len(utils.JwtKey) == 0 {
+		return "", http.ErrNoCookie
+	}
+
+	claims := &gmailOAuthStateClaims{
+		Email:       email,
+		RedirectURL: sanitizeRedirectURL(redirectURL),
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   email,
+			ExpiresAt: jwt.NewNumericDate(now.Add(gmailOAuthStateTTL)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(utils.JwtKey)
+}
+
+func validateGmailOAuthState(state string) (string, string, error) {
+	if state == "" || len(utils.JwtKey) == 0 {
+		return "", "", http.ErrNoCookie
+	}
+
+	claims := &gmailOAuthStateClaims{}
+	token, err := jwt.ParseWithClaims(state, claims, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, http.ErrNoCookie
+		}
+		return utils.JwtKey, nil
+	})
+	if err != nil {
+		return "", "", err
+	}
+	if !token.Valid || claims.Subject == "" {
+		return "", "", http.ErrNoCookie
+	}
+
+	return claims.Subject, sanitizeRedirectURL(claims.RedirectURL), nil
+}
+
 func createSlackOAuthState(userID, workspaceID int, now time.Time) (string, error) {
 	if len(utils.JwtKey) == 0 {
 		return "", http.ErrNoCookie
@@ -933,4 +1166,163 @@ func validateSlackOAuthState(state string) (int, int, error) {
 	}
 
 	return claims.UserID, claims.WorkspaceID, nil
+}
+
+func buildGmailAuthURL(state, redirectURI string) string {
+	config := &oauth2.Config{
+		ClientID:     gmailClientID,
+		ClientSecret: gmailClientSecret,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://accounts.google.com/o/oauth2/auth",
+			TokenURL: "https://oauth2.googleapis.com/token",
+		},
+		RedirectURL: redirectURI,
+		Scopes: []string{
+			"https://www.googleapis.com/auth/gmail.readonly",
+			"https://www.googleapis.com/auth/userinfo.email",
+			"https://www.googleapis.com/auth/userinfo.profile",
+		},
+	}
+	return config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
+}
+
+func exchangeGmailCode(code, redirectURI string) (*oauth2.Token, error) {
+	config := &oauth2.Config{
+		ClientID:     gmailClientID,
+		ClientSecret: gmailClientSecret,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://accounts.google.com/o/oauth2/auth",
+			TokenURL: "https://oauth2.googleapis.com/token",
+		},
+		RedirectURL: redirectURI,
+		Scopes: []string{
+			"https://www.googleapis.com/auth/gmail.readonly",
+			"https://www.googleapis.com/auth/userinfo.email",
+			"https://www.googleapis.com/auth/userinfo.profile",
+		},
+	}
+	return config.Exchange(context.Background(), code)
+}
+
+func fetchGmailProfile(token *oauth2.Token) (*gmailProfile, error) {
+	if token == nil || token.AccessToken == "" {
+		return nil, fmt.Errorf("missing access token")
+	}
+
+	client := oauth2.NewClient(context.Background(), oauth2.StaticTokenSource(token))
+	req, err := http.NewRequest(http.MethodGet, "https://www.googleapis.com/oauth2/v2/userinfo", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gmail userinfo request failed with status %d", resp.StatusCode)
+	}
+
+	var profile gmailProfile
+	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(profile.Email) == "" {
+		return nil, fmt.Errorf("gmail profile did not include an email address")
+	}
+	return &profile, nil
+}
+
+func saveGmailIntegration(userID int, token *oauth2.Token, profile *gmailProfile) error {
+	if tokenEncryptor == nil {
+		return fmt.Errorf("token encryption is not configured")
+	}
+
+	encryptedAccessToken, err := tokenEncryptor.Encrypt(token.AccessToken)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt access token: %w", err)
+	}
+
+	var encryptedRefreshToken string
+	if token.RefreshToken != "" {
+		encryptedRefreshToken, err = tokenEncryptor.Encrypt(token.RefreshToken)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt refresh token: %w", err)
+		}
+	}
+
+	metadata := map[string]interface{}{
+		"email":          profile.Email,
+		"name":           profile.Name,
+		"verified_email": profile.VerifiedEmail,
+	}
+	if scope, ok := token.Extra("scope").(string); ok && scope != "" {
+		metadata["scope"] = scope
+	}
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+
+	result, err := database.DB.Exec(
+		`UPDATE external_integrations
+		 SET access_token = ?, refresh_token = ?, expires_at = ?, metadata = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE user_id = ? AND provider = 'gmail' AND workspace_id IS NULL`,
+		encryptedAccessToken, encryptedRefreshToken, token.Expiry, string(metadataJSON), userID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected > 0 {
+		return nil
+	}
+
+	_, err = database.DB.Exec(
+		`INSERT INTO external_integrations
+		 (user_id, workspace_id, provider, access_token, refresh_token, expires_at, metadata, updated_at)
+		 VALUES (?, NULL, 'gmail', ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		userID, encryptedAccessToken, encryptedRefreshToken, token.Expiry, string(metadataJSON),
+	)
+	return err
+}
+
+func sanitizeRedirectURL(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+		return parsed.String()
+	default:
+		return ""
+	}
+}
+
+func redirectOAuthResultIfPossible(w http.ResponseWriter, r *http.Request, redirectURL, provider, status string) bool {
+	redirectURL = sanitizeRedirectURL(redirectURL)
+	if redirectURL == "" {
+		return false
+	}
+
+	parsed, err := url.Parse(redirectURL)
+	if err != nil {
+		return false
+	}
+
+	query := parsed.Query()
+	query.Set(provider, status)
+	parsed.RawQuery = query.Encode()
+	http.Redirect(w, r, parsed.String(), http.StatusFound)
+	return true
 }
