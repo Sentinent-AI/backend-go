@@ -10,6 +10,7 @@ import (
 	"sentinent-backend/models"
 	"sentinent-backend/utils"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -29,6 +30,20 @@ func setupTestDB() {
 	);`
 
 	_, err = database.DB.Exec(createTable)
+	if err != nil {
+		panic(err)
+	}
+
+	resetTable := `
+	CREATE TABLE IF NOT EXISTS password_reset_tokens (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		token_hash TEXT NOT NULL UNIQUE,
+		expires_at DATETIME NOT NULL,
+		used_at DATETIME,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
+	_, err = database.DB.Exec(resetTable)
 	if err != nil {
 		panic(err)
 	}
@@ -183,5 +198,112 @@ func TestSigninInvalidEmail(t *testing.T) {
 	if status := rr.Code; status != http.StatusBadRequest {
 		t.Errorf("handler returned wrong status code: got %v want %v",
 			status, http.StatusBadRequest)
+	}
+}
+
+func TestForgotPasswordGeneratesResetTokenForExistingUser(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+	t.Setenv("FRONTEND_BASE_URL", "http://localhost:4200")
+
+	Signup(httptest.NewRecorder(), httptest.NewRequest("POST", "/signup", bytes.NewBuffer([]byte(`{"email":"test@example.com","password":"password123"}`))))
+
+	req, _ := http.NewRequest("POST", "/forgot-password", bytes.NewBuffer([]byte(`{"email":"test@example.com"}`)))
+	rr := httptest.NewRecorder()
+
+	ForgotPassword(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if response["reset_url"] == "" {
+		t.Fatal("expected reset_url in forgot password response")
+	}
+
+	var count int
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM password_reset_tokens").Scan(&count); err != nil {
+		t.Fatalf("failed to query reset tokens: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 reset token, got %d", count)
+	}
+}
+
+func TestForgotPasswordDoesNotRevealMissingEmail(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+
+	req, _ := http.NewRequest("POST", "/forgot-password", bytes.NewBuffer([]byte(`{"email":"missing@example.com"}`)))
+	rr := httptest.NewRecorder()
+
+	ForgotPassword(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var count int
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM password_reset_tokens").Scan(&count); err != nil {
+		t.Fatalf("failed to query reset tokens: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 reset tokens, got %d", count)
+	}
+}
+
+func TestValidateAndResetPassword(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+
+	Signup(httptest.NewRecorder(), httptest.NewRequest("POST", "/signup", bytes.NewBuffer([]byte(`{"email":"test@example.com","password":"password123"}`))))
+
+	resetToken, err := generatePasswordResetToken()
+	if err != nil {
+		t.Fatalf("failed to create reset token: %v", err)
+	}
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
+		 VALUES (1, ?, ?)`,
+		hashPasswordResetToken(resetToken), time.Now().Add(time.Hour),
+	); err != nil {
+		t.Fatalf("failed to seed reset token: %v", err)
+	}
+
+	validateReq, _ := http.NewRequest("GET", "/api/reset-password/"+resetToken, nil)
+	validateRR := httptest.NewRecorder()
+	ValidatePasswordResetToken(validateRR, validateReq)
+
+	if validateRR.Code != http.StatusOK {
+		t.Fatalf("expected validate status 200, got %d", validateRR.Code)
+	}
+
+	resetReq, _ := http.NewRequest("POST", "/api/reset-password/"+resetToken, bytes.NewBuffer([]byte(`{"password":"newsecret123"}`)))
+	resetRR := httptest.NewRecorder()
+	ResetPassword(resetRR, resetReq)
+
+	if resetRR.Code != http.StatusNoContent {
+		t.Fatalf("expected reset status 204, got %d", resetRR.Code)
+	}
+
+	loginReq, _ := http.NewRequest("POST", "/signin", bytes.NewBuffer([]byte(`{"email":"test@example.com","password":"newsecret123"}`)))
+	loginRR := httptest.NewRecorder()
+	Signin(loginRR, loginReq)
+
+	if loginRR.Code != http.StatusOK {
+		t.Fatalf("expected login with new password to succeed, got %d", loginRR.Code)
+	}
+
+	validateAgainReq, _ := http.NewRequest("GET", "/api/reset-password/"+resetToken, nil)
+	validateAgainRR := httptest.NewRecorder()
+	ValidatePasswordResetToken(validateAgainRR, validateAgainReq)
+
+	if validateAgainRR.Code != http.StatusGone {
+		t.Fatalf("expected used token to be rejected, got %d", validateAgainRR.Code)
 	}
 }
