@@ -51,6 +51,7 @@ func main() {
 	// Public routes
 	mux.HandleFunc("/api/signup", handlers.Signup)
 	mux.HandleFunc("/api/login", handlers.Signin) // Frontend calls /login
+	mux.HandleFunc("/api/logout", handlers.Logout)
 	mux.HandleFunc("/api/forgot-password", handlers.ForgotPassword)
 	mux.HandleFunc("/api/reset-password/", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
