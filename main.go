@@ -51,6 +51,7 @@ func main() {
 	// Public routes
 	mux.HandleFunc("/api/signup", handlers.Signup)
 	mux.HandleFunc("/api/login", handlers.Signin) // Frontend calls /login
+	mux.HandleFunc("/api/logout", handlers.Logout)
 
 	// Provider callbacks (public)
 	mux.HandleFunc("/api/integrations/slack/callback", handlers.SlackCallback)

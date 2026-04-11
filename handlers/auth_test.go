@@ -144,6 +144,38 @@ func TestSigninCookieSecureInProduction(t *testing.T) {
 	}
 }
 
+func TestLogoutClearsCookie(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+	t.Setenv("APP_ENV", "development")
+
+	req, _ := http.NewRequest(http.MethodPost, "/logout", nil)
+	rr := httptest.NewRecorder()
+
+	Logout(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected status 204, got %d", rr.Code)
+	}
+
+	var tokenCookie *http.Cookie
+	for _, cookie := range rr.Result().Cookies() {
+		if cookie.Name == "token" {
+			tokenCookie = cookie
+			break
+		}
+	}
+	if tokenCookie == nil {
+		t.Fatal("expected cleared token cookie")
+	}
+	if tokenCookie.Value != "" {
+		t.Fatalf("expected cleared cookie value, got %q", tokenCookie.Value)
+	}
+	if tokenCookie.MaxAge != -1 {
+		t.Fatalf("expected MaxAge -1, got %d", tokenCookie.MaxAge)
+	}
+}
+
 func TestSignupInvalidEmail(t *testing.T) {
 	setupTestDB()
 	defer database.DB.Close()
