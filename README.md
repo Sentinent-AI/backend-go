@@ -10,10 +10,15 @@ Set these before running the server:
 Optional:
 
 - `APP_ENV`: Set to `production` (or `prod`) to enable `Secure` auth cookies.
-- `TOKEN_ENCRYPTION_KEY`: Required when using Slack, GitHub, or Gmail OAuth integrations so tokens are encrypted at rest.
-- `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_REDIRECT_URI`: Slack OAuth configuration.
-- `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`: GitHub OAuth configuration.
-- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`: Gmail OAuth configuration.
+- `FRONTEND_BASE_URL`: Used when generating password reset links. Defaults to `http://localhost:4200`.
+- `SMTP_HOST`: SMTP host used to send password reset emails.
+- `SMTP_PORT`: SMTP port used to send password reset emails.
+- `SMTP_USERNAME`: SMTP username when the mail server requires authentication.
+- `SMTP_PASSWORD`: SMTP password when the mail server requires authentication.
+- `SMTP_FROM_EMAIL`: From address used for password reset emails.
+- `SMTP_FROM_NAME`: Optional display name for password reset emails.
+
+Production password reset email delivery requires the SMTP settings above. In non-production environments, the API falls back to returning `reset_url` in the forgot-password response when SMTP is not configured.
 
 ## Example (local development)
 
