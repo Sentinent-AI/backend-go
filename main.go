@@ -51,6 +51,17 @@ func main() {
 	// Public routes
 	mux.HandleFunc("/api/signup", handlers.Signup)
 	mux.HandleFunc("/api/login", handlers.Signin) // Frontend calls /login
+	mux.HandleFunc("/api/forgot-password", handlers.ForgotPassword)
+	mux.HandleFunc("/api/reset-password/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handlers.ValidatePasswordResetToken(w, r)
+		case http.MethodPost:
+			handlers.ResetPassword(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 
 	// Provider callbacks (public)
 	mux.HandleFunc("/api/integrations/slack/callback", handlers.SlackCallback)
