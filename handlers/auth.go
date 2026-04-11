@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sentinent-backend/database"
 	"sentinent-backend/models"
+	"sentinent-backend/services"
 	"sentinent-backend/utils"
 	"strings"
 	"time"
@@ -20,6 +22,8 @@ import (
 )
 
 const passwordResetTTL = time.Hour
+
+var sendPasswordResetEmailFunc = services.SendPasswordResetEmail
 
 type forgotPasswordRequest struct {
 	Email string `json:"email"`
@@ -127,6 +131,12 @@ func ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	emailDeliveryConfigured := services.PasswordResetEmailDeliveryConfigured()
+	if isProductionEnv() && !emailDeliveryConfigured {
+		http.Error(w, "Failed to process reset request", http.StatusInternalServerError)
+		return
+	}
+
 	var req forgotPasswordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -188,7 +198,22 @@ func ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeForgotPasswordResponse(w, buildPasswordResetURL(resetToken))
+	resetURL := buildPasswordResetURL(resetToken)
+	if !emailDeliveryConfigured {
+		writeForgotPasswordResponse(w, resetURL)
+		return
+	}
+
+	if err := sendPasswordResetEmailFunc(req.Email, resetURL); err != nil {
+		log.Printf("failed to send password reset email for %s: %v", req.Email, err)
+		if _, cleanupErr := database.DB.Exec("DELETE FROM password_reset_tokens WHERE token_hash = ?", tokenHash); cleanupErr != nil {
+			log.Printf("failed to clean up password reset token after email delivery error: %v", cleanupErr)
+		}
+		http.Error(w, "Failed to process reset request", http.StatusInternalServerError)
+		return
+	}
+
+	writeForgotPasswordResponse(w, "")
 }
 
 func ValidatePasswordResetToken(w http.ResponseWriter, r *http.Request) {
@@ -316,7 +341,7 @@ func lookupPasswordResetRecord(token string) (*passwordResetRecord, int, error) 
 
 func writeForgotPasswordResponse(w http.ResponseWriter, resetURL string) {
 	response := map[string]string{
-		"message": "If an account exists for that email, a reset link has been generated.",
+		"message": "If an account exists for that email, password reset instructions have been sent.",
 	}
 	if resetURL != "" {
 		response["reset_url"] = resetURL

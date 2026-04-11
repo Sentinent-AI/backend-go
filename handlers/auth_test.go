@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sentinent-backend/database"
 	"sentinent-backend/models"
 	"sentinent-backend/utils"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,6 +236,63 @@ func TestForgotPasswordGeneratesResetTokenForExistingUser(t *testing.T) {
 	}
 }
 
+func TestForgotPasswordSendsResetEmailWhenMailerConfigured(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+	t.Setenv("FRONTEND_BASE_URL", "https://app.example.com")
+	t.Setenv("SMTP_HOST", "smtp.example.com")
+	t.Setenv("SMTP_PORT", "587")
+	t.Setenv("SMTP_USERNAME", "mailer")
+	t.Setenv("SMTP_PASSWORD", "secret")
+	t.Setenv("SMTP_FROM_EMAIL", "no-reply@example.com")
+
+	originalSendPasswordResetEmailFunc := sendPasswordResetEmailFunc
+	t.Cleanup(func() {
+		sendPasswordResetEmailFunc = originalSendPasswordResetEmailFunc
+	})
+
+	var deliveredTo string
+	var deliveredURL string
+	sendPasswordResetEmailFunc = func(toEmail, resetURL string) error {
+		deliveredTo = toEmail
+		deliveredURL = resetURL
+		return nil
+	}
+
+	Signup(httptest.NewRecorder(), httptest.NewRequest("POST", "/signup", bytes.NewBuffer([]byte(`{"email":"test@example.com","password":"password123"}`))))
+
+	req, _ := http.NewRequest("POST", "/forgot-password", bytes.NewBuffer([]byte(`{"email":"test@example.com"}`)))
+	rr := httptest.NewRecorder()
+
+	ForgotPassword(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if response["reset_url"] != "" {
+		t.Fatal("expected reset_url to be hidden when mail delivery is configured")
+	}
+	if deliveredTo != "test@example.com" {
+		t.Fatalf("expected email to be sent to test@example.com, got %q", deliveredTo)
+	}
+	if !strings.HasPrefix(deliveredURL, "https://app.example.com/reset-password/") {
+		t.Fatalf("expected reset URL to use frontend base URL, got %q", deliveredURL)
+	}
+
+	var count int
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM password_reset_tokens").Scan(&count); err != nil {
+		t.Fatalf("failed to query reset tokens: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 reset token, got %d", count)
+	}
+}
+
 func TestForgotPasswordDoesNotRevealMissingEmail(t *testing.T) {
 	setupTestDB()
 	defer database.DB.Close()
@@ -253,6 +312,69 @@ func TestForgotPasswordDoesNotRevealMissingEmail(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected 0 reset tokens, got %d", count)
+	}
+}
+
+func TestForgotPasswordFailsInProductionWithoutMailer(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+	t.Setenv("APP_ENV", "production")
+
+	Signup(httptest.NewRecorder(), httptest.NewRequest("POST", "/signup", bytes.NewBuffer([]byte(`{"email":"test@example.com","password":"password123"}`))))
+
+	req, _ := http.NewRequest("POST", "/forgot-password", bytes.NewBuffer([]byte(`{"email":"test@example.com"}`)))
+	rr := httptest.NewRecorder()
+
+	ForgotPassword(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rr.Code)
+	}
+
+	var count int
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM password_reset_tokens").Scan(&count); err != nil {
+		t.Fatalf("failed to query reset tokens: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 reset tokens, got %d", count)
+	}
+}
+
+func TestForgotPasswordDeletesTokenWhenEmailDeliveryFails(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+	t.Setenv("SMTP_HOST", "smtp.example.com")
+	t.Setenv("SMTP_PORT", "587")
+	t.Setenv("SMTP_USERNAME", "mailer")
+	t.Setenv("SMTP_PASSWORD", "secret")
+	t.Setenv("SMTP_FROM_EMAIL", "no-reply@example.com")
+
+	originalSendPasswordResetEmailFunc := sendPasswordResetEmailFunc
+	t.Cleanup(func() {
+		sendPasswordResetEmailFunc = originalSendPasswordResetEmailFunc
+	})
+
+	sendPasswordResetEmailFunc = func(toEmail, resetURL string) error {
+		return fmt.Errorf("smtp unavailable")
+	}
+
+	Signup(httptest.NewRecorder(), httptest.NewRequest("POST", "/signup", bytes.NewBuffer([]byte(`{"email":"test@example.com","password":"password123"}`))))
+
+	req, _ := http.NewRequest("POST", "/forgot-password", bytes.NewBuffer([]byte(`{"email":"test@example.com"}`)))
+	rr := httptest.NewRecorder()
+
+	ForgotPassword(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rr.Code)
+	}
+
+	var count int
+	if err := database.DB.QueryRow("SELECT COUNT(*) FROM password_reset_tokens").Scan(&count); err != nil {
+		t.Fatalf("failed to query reset tokens: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected failed delivery to clean up reset tokens, got %d", count)
 	}
 }
 
