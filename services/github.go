@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -9,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"context"
 	"net/http"
 	"net/url"
 	"os"
@@ -159,7 +159,7 @@ func DecryptToken(ciphertext string) (string, error) {
 }
 
 // SaveGitHubIntegration saves the GitHub integration for a user
-func SaveGitHubIntegration(userID int, token *oauth2.Token) error {
+func SaveGitHubIntegration(userID, workspaceID int, token *oauth2.Token) error {
 	encryptedToken, err := EncryptToken(token.AccessToken)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt token: %w", err)
@@ -176,8 +176,8 @@ func SaveGitHubIntegration(userID int, token *oauth2.Token) error {
 	result, err := database.DB.Exec(
 		`UPDATE external_integrations
 		 SET access_token = ?, refresh_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE user_id = ? AND provider = 'github' AND workspace_id IS NULL`,
-		encryptedToken, encryptedRefreshToken, token.Expiry, userID,
+		 WHERE user_id = ? AND provider = 'github' AND workspace_id = ?`,
+		encryptedToken, encryptedRefreshToken, token.Expiry, userID, workspaceID,
 	)
 	if err != nil {
 		return err
@@ -194,28 +194,28 @@ func SaveGitHubIntegration(userID int, token *oauth2.Token) error {
 	_, err = database.DB.Exec(
 		`INSERT INTO external_integrations
 		 (user_id, workspace_id, provider, access_token, refresh_token, expires_at, metadata, updated_at)
-		 VALUES (?, NULL, 'github', ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-		userID, encryptedToken, encryptedRefreshToken, token.Expiry, "",
+		 VALUES (?, ?, 'github', ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		userID, workspaceID, encryptedToken, encryptedRefreshToken, token.Expiry, "",
 	)
 	return err
 }
 
 // GetGitHubIntegration retrieves the GitHub integration for a user
-func GetGitHubIntegration(userID int) (*models.ExternalIntegration, error) {
+func GetGitHubIntegration(userID, workspaceID int) (*models.ExternalIntegration, error) {
 	var integration models.ExternalIntegration
-	var workspaceID sql.NullInt64
+	var storedWorkspaceID sql.NullInt64
 	var metadata sql.NullString
 	var expiresAt *time.Time
 
 	err := database.DB.QueryRow(
 		`SELECT id, user_id, workspace_id, provider, access_token, refresh_token, expires_at, metadata, created_at, updated_at
 		FROM external_integrations
-		WHERE user_id = ? AND provider = 'github' AND workspace_id IS NULL`,
-		userID,
+		WHERE user_id = ? AND provider = 'github' AND workspace_id = ?`,
+		userID, workspaceID,
 	).Scan(
 		&integration.ID,
 		&integration.UserID,
-		&workspaceID,
+		&storedWorkspaceID,
 		&integration.Provider,
 		&integration.AccessToken,
 		&integration.RefreshToken,
@@ -229,8 +229,8 @@ func GetGitHubIntegration(userID int) (*models.ExternalIntegration, error) {
 		return nil, err
 	}
 
-	if workspaceID.Valid {
-		integration.WorkspaceID = int(workspaceID.Int64)
+	if storedWorkspaceID.Valid {
+		integration.WorkspaceID = int(storedWorkspaceID.Int64)
 	}
 	if metadata.Valid {
 		integration.Metadata = metadata.String
@@ -240,17 +240,17 @@ func GetGitHubIntegration(userID int) (*models.ExternalIntegration, error) {
 }
 
 // DeleteGitHubIntegration removes the GitHub integration for a user
-func DeleteGitHubIntegration(userID int) error {
+func DeleteGitHubIntegration(userID, workspaceID int) error {
 	_, err := database.DB.Exec(
-		"DELETE FROM external_integrations WHERE user_id = ? AND provider = 'github' AND workspace_id IS NULL",
-		userID,
+		"DELETE FROM external_integrations WHERE user_id = ? AND provider = 'github' AND workspace_id = ?",
+		userID, workspaceID,
 	)
 	return err
 }
 
 // GetGitHubClient creates an HTTP client with the user's GitHub token
-func GetGitHubClient(userID int) (*http.Client, error) {
-	integration, err := GetGitHubIntegration(userID)
+func GetGitHubClient(userID, workspaceID int) (*http.Client, error) {
+	integration, err := GetGitHubIntegration(userID, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub integration not found: %w", err)
 	}
@@ -269,8 +269,8 @@ func GetGitHubClient(userID int) (*http.Client, error) {
 }
 
 // FetchAssignedIssues fetches issues assigned to the user
-func FetchAssignedIssues(userID int) ([]GitHubIssue, error) {
-	client, err := GetGitHubClient(userID)
+func FetchAssignedIssues(userID, workspaceID int) ([]GitHubIssue, error) {
+	client, err := GetGitHubClient(userID, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -366,8 +366,8 @@ func splitGitHubIssuesAndPullRequests(items []GitHubIssue) ([]GitHubIssue, []Git
 }
 
 // SyncGitHubSignals syncs GitHub issues and PRs to signals
-func SyncGitHubSignals(userID int) error {
-	items, err := FetchAssignedIssues(userID)
+func SyncGitHubSignals(userID, workspaceID int) error {
+	items, err := FetchAssignedIssues(userID, workspaceID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch issues: %w", err)
 	}
@@ -376,7 +376,7 @@ func SyncGitHubSignals(userID int) error {
 
 	// Save issues as signals
 	for _, issue := range issues {
-		if err := saveGitHubSignal(userID, issue, "issue"); err != nil {
+		if err := saveGitHubSignal(userID, workspaceID, issue, "issue"); err != nil {
 			// Log error but continue with other items
 			fmt.Printf("Failed to save issue signal: %v\n", err)
 		}
@@ -384,7 +384,7 @@ func SyncGitHubSignals(userID int) error {
 
 	// Save PRs as signals
 	for _, pr := range prs {
-		if err := saveGitHubSignal(userID, pr, "pull_request"); err != nil {
+		if err := saveGitHubSignal(userID, workspaceID, pr, "pull_request"); err != nil {
 			fmt.Printf("Failed to save PR signal: %v\n", err)
 		}
 	}
@@ -393,7 +393,7 @@ func SyncGitHubSignals(userID int) error {
 }
 
 // saveGitHubSignal saves a GitHub issue/PR as a signal
-func saveGitHubSignal(userID int, issue GitHubIssue, issueType string) error {
+func saveGitHubSignal(userID, workspaceID int, issue GitHubIssue, issueType string) error {
 	// Extract labels
 	labels := make([]string, 0, len(issue.Labels))
 	for _, label := range issue.Labels {
@@ -416,7 +416,7 @@ func saveGitHubSignal(userID int, issue GitHubIssue, issueType string) error {
 	_, err = database.DB.Exec(
 		`INSERT INTO signals
 		(user_id, workspace_id, source_type, source_id, external_id, title, content, body, url, author, status, source_metadata, received_at, updated_at)
-		VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(user_id, source_type, source_id) DO UPDATE SET
 		external_id = excluded.external_id,
 		title = excluded.title,
@@ -429,6 +429,7 @@ func saveGitHubSignal(userID int, issue GitHubIssue, issueType string) error {
 		received_at = excluded.received_at,
 		updated_at = CURRENT_TIMESTAMP`,
 		userID,
+		workspaceID,
 		models.SourceTypeGitHub,
 		strconv.FormatInt(issue.ID, 10),
 		strconv.FormatInt(issue.ID, 10),
@@ -542,8 +543,8 @@ func GetUserSignals(userID int, filter *models.SignalFilter) ([]models.Signal, e
 }
 
 // ListAccessibleRepos lists repositories accessible to the user
-func ListAccessibleRepos(userID int) ([]map[string]interface{}, error) {
-	client, err := GetGitHubClient(userID)
+func ListAccessibleRepos(userID, workspaceID int) ([]map[string]interface{}, error) {
+	client, err := GetGitHubClient(userID, workspaceID)
 	if err != nil {
 		return nil, err
 	}
