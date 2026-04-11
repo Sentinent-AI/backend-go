@@ -107,6 +107,26 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"token": tokenString})
 }
 
+func Logout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "token",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isProductionEnv(),
+		Expires:  time.Unix(0, 0),
+		MaxAge:   -1,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func isProductionEnv() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV"))) {
 	case "production", "prod":
