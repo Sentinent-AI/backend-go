@@ -51,11 +51,22 @@ func main() {
 	// Public routes
 	mux.HandleFunc("/api/signup", handlers.Signup)
 	mux.HandleFunc("/api/login", handlers.Signin) // Frontend calls /login
-	mux.HandleFunc("/api/logout", handlers.Logout)
+	mux.HandleFunc("/api/forgot-password", handlers.ForgotPassword)
+	mux.HandleFunc("/api/reset-password/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handlers.ValidatePasswordResetToken(w, r)
+		case http.MethodPost:
+			handlers.ResetPassword(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 
 	// Provider callbacks (public)
 	mux.HandleFunc("/api/integrations/slack/callback", handlers.SlackCallback)
 	mux.HandleFunc("/api/integrations/github/callback", handlers.GitHubCallbackHandler)
+	mux.HandleFunc("/api/integrations/gmail/callback", handlers.GmailCallbackHandler)
 
 	// Protected routes
 	protectedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +88,8 @@ func main() {
 	mux.Handle("/api/integrations/github/repos", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubReposHandler)))
 	mux.Handle("/api/integrations/github/sync", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubSyncHandler)))
 	mux.Handle("/api/integrations/github", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubDisconnectHandler)))
+	mux.Handle("/api/integrations/gmail/auth", middleware.AuthMiddleware(http.HandlerFunc(handlers.GmailAuthHandler)))
+	mux.Handle("/api/integrations/gmail", middleware.AuthMiddleware(http.HandlerFunc(handlers.GmailDisconnectHandler)))
 	mux.Handle("/api/integrations/status", middleware.AuthMiddleware(http.HandlerFunc(handlers.IntegrationStatusHandler)))
 	mux.Handle("/api/integrations/", middleware.AuthMiddleware(http.HandlerFunc(handlers.DeleteIntegration)))
 

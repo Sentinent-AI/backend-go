@@ -1,12 +1,18 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sentinent-backend/database"
 	"sentinent-backend/models"
+	"sentinent-backend/services"
 	"sentinent-backend/utils"
 	"strings"
 	"time"
@@ -14,6 +20,18 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
+
+const passwordResetTTL = time.Hour
+
+var sendPasswordResetEmailFunc = services.SendPasswordResetEmail
+
+type forgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+type resetPasswordRequest struct {
+	Password string `json:"password"`
+}
 
 func Signup(w http.ResponseWriter, r *http.Request) {
 	var user models.User
@@ -107,22 +125,170 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"token": tokenString})
 }
 
-func Logout(w http.ResponseWriter, r *http.Request) {
+func ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "token",
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   isProductionEnv(),
-		Expires:  time.Unix(0, 0),
-		MaxAge:   -1,
+	emailDeliveryConfigured := services.PasswordResetEmailDeliveryConfigured()
+	if isProductionEnv() && !emailDeliveryConfigured {
+		http.Error(w, "Failed to process reset request", http.StatusInternalServerError)
+		return
+	}
+
+	var req forgotPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	req.Email = strings.TrimSpace(req.Email)
+	if !utils.IsEmailValid(req.Email) {
+		http.Error(w, "Invalid email format", http.StatusBadRequest)
+		return
+	}
+
+	var userID int
+	err := database.DB.QueryRow("SELECT id FROM users WHERE email = ?", req.Email).Scan(&userID)
+	if err == sql.ErrNoRows {
+		writeForgotPasswordResponse(w, "")
+		return
+	}
+	if err != nil {
+		http.Error(w, "Failed to process reset request", http.StatusInternalServerError)
+		return
+	}
+
+	resetToken, err := generatePasswordResetToken()
+	if err != nil {
+		http.Error(w, "Failed to process reset request", http.StatusInternalServerError)
+		return
+	}
+
+	expiresAt := time.Now().Add(passwordResetTTL)
+	tokenHash := hashPasswordResetToken(resetToken)
+
+	tx, err := database.DB.Begin()
+	if err != nil {
+		http.Error(w, "Failed to process reset request", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		"DELETE FROM password_reset_tokens WHERE user_id = ? OR expires_at <= ? OR used_at IS NOT NULL",
+		userID, time.Now(),
+	); err != nil {
+		http.Error(w, "Failed to process reset request", http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
+		 VALUES (?, ?, ?)`,
+		userID, tokenHash, expiresAt,
+	); err != nil {
+		http.Error(w, "Failed to process reset request", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "Failed to process reset request", http.StatusInternalServerError)
+		return
+	}
+
+	resetURL := buildPasswordResetURL(resetToken)
+	if !emailDeliveryConfigured {
+		writeForgotPasswordResponse(w, resetURL)
+		return
+	}
+
+	if err := sendPasswordResetEmailFunc(req.Email, resetURL); err != nil {
+		log.Printf("failed to send password reset email for %s: %v", req.Email, err)
+		if _, cleanupErr := database.DB.Exec("DELETE FROM password_reset_tokens WHERE token_hash = ?", tokenHash); cleanupErr != nil {
+			log.Printf("failed to clean up password reset token after email delivery error: %v", cleanupErr)
+		}
+		http.Error(w, "Failed to process reset request", http.StatusInternalServerError)
+		return
+	}
+
+	writeForgotPasswordResponse(w, "")
+}
+
+func ValidatePasswordResetToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	record, statusCode, err := lookupPasswordResetRecord(extractPasswordResetToken(r.URL.Path))
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"valid": true,
+		"email": record.Email,
 	})
+}
+
+func ResetPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	record, statusCode, err := lookupPasswordResetRecord(extractPasswordResetToken(r.URL.Path))
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	var req resetPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	req.Password = strings.TrimSpace(req.Password)
+	if len(req.Password) < 8 {
+		http.Error(w, "Password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Failed to update password", http.StatusInternalServerError)
+		return
+	}
+
+	tx, err := database.DB.Begin()
+	if err != nil {
+		http.Error(w, "Failed to update password", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("UPDATE users SET password = ? WHERE id = ?", string(hashedPassword), record.UserID); err != nil {
+		http.Error(w, "Failed to update password", http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := tx.Exec(
+		"UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL",
+		time.Now(), record.UserID,
+	); err != nil {
+		http.Error(w, "Failed to update password", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "Failed to update password", http.StatusInternalServerError)
+		return
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -134,4 +300,82 @@ func isProductionEnv() bool {
 	default:
 		return false
 	}
+}
+
+type passwordResetRecord struct {
+	ID     int
+	UserID int
+	Email  string
+}
+
+func lookupPasswordResetRecord(token string) (*passwordResetRecord, int, error) {
+	if token == "" {
+		return nil, http.StatusBadRequest, fmt.Errorf("Invalid reset token")
+	}
+
+	var record passwordResetRecord
+	var expiresAt time.Time
+	var usedAt sql.NullTime
+	err := database.DB.QueryRow(
+		`SELECT prt.id, prt.user_id, u.email, prt.expires_at, prt.used_at
+		 FROM password_reset_tokens prt
+		 JOIN users u ON u.id = prt.user_id
+		 WHERE prt.token_hash = ?`,
+		hashPasswordResetToken(token),
+	).Scan(&record.ID, &record.UserID, &record.Email, &expiresAt, &usedAt)
+	if err == sql.ErrNoRows {
+		return nil, http.StatusNotFound, fmt.Errorf("Invalid reset token")
+	}
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("Failed to validate reset token")
+	}
+	if usedAt.Valid {
+		return nil, http.StatusGone, fmt.Errorf("Reset token has already been used")
+	}
+	if time.Now().After(expiresAt) {
+		return nil, http.StatusGone, fmt.Errorf("Reset token has expired")
+	}
+
+	return &record, http.StatusOK, nil
+}
+
+func writeForgotPasswordResponse(w http.ResponseWriter, resetURL string) {
+	response := map[string]string{
+		"message": "If an account exists for that email, password reset instructions have been sent.",
+	}
+	if resetURL != "" {
+		response["reset_url"] = resetURL
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func buildPasswordResetURL(token string) string {
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("FRONTEND_BASE_URL")), "/")
+	if baseURL == "" {
+		baseURL = "http://localhost:4200"
+	}
+	return fmt.Sprintf("%s/reset-password/%s", baseURL, token)
+}
+
+func extractPasswordResetToken(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "reset-password" {
+		return parts[2]
+	}
+	return ""
+}
+
+func generatePasswordResetToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
+}
+
+func hashPasswordResetToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }

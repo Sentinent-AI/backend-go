@@ -370,6 +370,173 @@ func TestGitHubCallbackHandlerAcceptsValidState(t *testing.T) {
 	}
 }
 
+func TestGmailAuthHandlerSetsSignedStateCookie(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+
+	originalGmailClientID := gmailClientID
+	originalGmailClientSecret := gmailClientSecret
+	originalTokenEncryptor := tokenEncryptor
+	t.Setenv("TOKEN_ENCRYPTION_KEY", "test-encryption-key-32-bytes-long!")
+
+	encryptor, err := utils.NewTokenEncryptor()
+	if err != nil {
+		t.Fatalf("failed to create encryptor: %v", err)
+	}
+
+	gmailClientID = "gmail-client"
+	gmailClientSecret = "gmail-secret"
+	tokenEncryptor = encryptor
+	t.Cleanup(func() {
+		gmailClientID = originalGmailClientID
+		gmailClientSecret = originalGmailClientSecret
+		tokenEncryptor = originalTokenEncryptor
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations/gmail/auth?redirect_url="+url.QueryEscape("http://localhost:4200/workspaces/7/settings/integrations"), nil)
+	req = req.WithContext(context.WithValue(req.Context(), middleware.UserEmailKey, "octo@example.com"))
+	rr := httptest.NewRecorder()
+
+	GmailAuthHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var payload map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&payload); err != nil {
+		t.Fatalf("expected JSON response: %v", err)
+	}
+
+	authURL, err := url.Parse(payload["auth_url"])
+	if err != nil {
+		t.Fatalf("failed to parse auth URL: %v", err)
+	}
+
+	email, redirectURL, err := validateGmailOAuthState(authURL.Query().Get("state"))
+	if err != nil {
+		t.Fatalf("expected signed state to validate: %v", err)
+	}
+	if email != "octo@example.com" {
+		t.Fatalf("expected state to be bound to octo@example.com, got %q", email)
+	}
+	if redirectURL != "http://localhost:4200/workspaces/7/settings/integrations" {
+		t.Fatalf("unexpected redirect URL in state: %q", redirectURL)
+	}
+
+	var stateCookie *http.Cookie
+	for _, cookie := range rr.Result().Cookies() {
+		if cookie.Name == gmailOAuthStateCookieName {
+			stateCookie = cookie
+			break
+		}
+	}
+	if stateCookie == nil {
+		t.Fatal("expected Gmail OAuth state cookie to be set")
+	}
+}
+
+func TestGmailCallbackHandlerAcceptsValidState(t *testing.T) {
+	setupIntegrationsTestDB(t)
+	defer database.DB.Close()
+
+	originalGmailClientID := gmailClientID
+	originalGmailClientSecret := gmailClientSecret
+	originalTokenEncryptor := tokenEncryptor
+	originalGmailExchangeCodeFunc := gmailExchangeCodeFunc
+	originalGmailFetchProfileFunc := gmailFetchProfileFunc
+
+	t.Setenv("TOKEN_ENCRYPTION_KEY", "test-encryption-key-32-bytes-long!")
+	t.Setenv("GOOGLE_REDIRECT_URI", "https://example.ngrok.app/api/integrations/gmail/callback")
+
+	encryptor, err := utils.NewTokenEncryptor()
+	if err != nil {
+		t.Fatalf("failed to create encryptor: %v", err)
+	}
+
+	gmailClientID = "gmail-client"
+	gmailClientSecret = "gmail-secret"
+	tokenEncryptor = encryptor
+	gmailExchangeCodeFunc = func(code, redirectURI string) (*oauth2.Token, error) {
+		if code != "test-code" {
+			t.Fatalf("expected code test-code, got %q", code)
+		}
+		if redirectURI != "https://example.ngrok.app/api/integrations/gmail/callback" {
+			t.Fatalf("unexpected redirect URI: %q", redirectURI)
+		}
+		return &oauth2.Token{
+			AccessToken:  "gmail-access-token",
+			RefreshToken: "gmail-refresh-token",
+			Expiry:       time.Now().Add(time.Hour),
+		}, nil
+	}
+	gmailFetchProfileFunc = func(token *oauth2.Token) (*gmailProfile, error) {
+		if token.AccessToken != "gmail-access-token" {
+			t.Fatalf("expected gmail access token, got %q", token.AccessToken)
+		}
+		return &gmailProfile{
+			Email:         "mailbox@example.com",
+			Name:          "Mailbox User",
+			VerifiedEmail: true,
+		}, nil
+	}
+	t.Cleanup(func() {
+		gmailClientID = originalGmailClientID
+		gmailClientSecret = originalGmailClientSecret
+		tokenEncryptor = originalTokenEncryptor
+		gmailExchangeCodeFunc = originalGmailExchangeCodeFunc
+		gmailFetchProfileFunc = originalGmailFetchProfileFunc
+	})
+
+	state, err := createGmailOAuthState("reader@example.com", "", time.Now())
+	if err != nil {
+		t.Fatalf("failed to create state: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations/gmail/callback?code=test-code&state="+url.QueryEscape(state), nil)
+	req.AddCookie(&http.Cookie{Name: gmailOAuthStateCookieName, Value: state})
+	rr := httptest.NewRecorder()
+
+	GmailCallbackHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var accessToken, refreshToken, metadata string
+	if err := database.DB.QueryRow(
+		`SELECT access_token, refresh_token, metadata FROM external_integrations
+		 WHERE user_id = ? AND provider = 'gmail' AND workspace_id IS NULL`,
+		1,
+	).Scan(&accessToken, &refreshToken, &metadata); err != nil {
+		t.Fatalf("failed to query saved gmail integration: %v", err)
+	}
+
+	decryptedAccessToken, err := tokenEncryptor.Decrypt(accessToken)
+	if err != nil {
+		t.Fatalf("failed to decrypt saved access token: %v", err)
+	}
+	if decryptedAccessToken != "gmail-access-token" {
+		t.Fatalf("unexpected decrypted access token %q", decryptedAccessToken)
+	}
+
+	decryptedRefreshToken, err := tokenEncryptor.Decrypt(refreshToken)
+	if err != nil {
+		t.Fatalf("failed to decrypt saved refresh token: %v", err)
+	}
+	if decryptedRefreshToken != "gmail-refresh-token" {
+		t.Fatalf("unexpected decrypted refresh token %q", decryptedRefreshToken)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(metadata), &payload); err != nil {
+		t.Fatalf("failed to decode integration metadata: %v", err)
+	}
+	if payload["email"] != "mailbox@example.com" {
+		t.Fatalf("expected connected gmail email in metadata, got %#v", payload["email"])
+	}
+}
+
 func setupIntegrationsTestDB(t *testing.T) {
 	t.Helper()
 
@@ -519,17 +686,22 @@ func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
 			(id, user_id, workspace_id, provider, access_token, metadata)
 		 VALUES
 			(7, 1, 9, 'slack', 'token-7', '{"team":"workspace-9"}'),
-			(8, 1, NULL, 'github', 'token-8', '{"scope":"global"}')`,
+			(8, 1, NULL, 'github', 'token-8', '{"scope":"global"}'),
+			(9, 1, NULL, 'gmail', 'token-9', '{"email":"mailbox@example.com"}')`,
 	); err != nil {
 		t.Fatalf("failed to seed integration statuses: %v", err)
 	}
 
 	originalSlackClientID := slackClientID
 	originalSlackClientSecret := slackClientSecret
+	originalGmailClientID := gmailClientID
+	originalGmailClientSecret := gmailClientSecret
 	originalTokenEncryptor := tokenEncryptor
 	t.Cleanup(func() {
 		slackClientID = originalSlackClientID
 		slackClientSecret = originalSlackClientSecret
+		gmailClientID = originalGmailClientID
+		gmailClientSecret = originalGmailClientSecret
 		tokenEncryptor = originalTokenEncryptor
 	})
 
@@ -540,6 +712,8 @@ func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
 	}
 	slackClientID = "slack-client"
 	slackClientSecret = "slack-secret"
+	gmailClientID = "gmail-client"
+	gmailClientSecret = "gmail-secret"
 	tokenEncryptor = encryptor
 
 	req := integrationRequestWithUser(http.MethodGet, "/api/integrations/status?workspace_id=9", "reader@example.com")
@@ -556,17 +730,19 @@ func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
 		t.Fatalf("failed to decode integration statuses: %v", err)
 	}
 
-	if len(statuses) != 2 {
-		t.Fatalf("expected 2 statuses, got %d", len(statuses))
+	if len(statuses) != 3 {
+		t.Fatalf("expected 3 statuses, got %d", len(statuses))
 	}
 
-	var slackStatus, githubStatus *models.IntegrationStatus
+	var slackStatus, githubStatus, gmailStatus *models.IntegrationStatus
 	for i := range statuses {
 		switch statuses[i].Provider {
 		case "slack":
 			slackStatus = &statuses[i]
 		case "github":
 			githubStatus = &statuses[i]
+		case "gmail":
+			gmailStatus = &statuses[i]
 		}
 	}
 
@@ -575,5 +751,8 @@ func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
 	}
 	if githubStatus == nil || !githubStatus.Connected {
 		t.Fatalf("expected connected github status, got %+v", githubStatus)
+	}
+	if gmailStatus == nil || !gmailStatus.Configured || !gmailStatus.Connected {
+		t.Fatalf("expected configured and connected gmail status, got %+v", gmailStatus)
 	}
 }
