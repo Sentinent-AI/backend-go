@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"sentinent-backend/database"
 	"sentinent-backend/middleware"
@@ -154,6 +155,7 @@ func GetWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("Successfully fetched workspace %d", workspaceID)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(workspace)
 }
