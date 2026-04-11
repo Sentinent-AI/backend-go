@@ -51,7 +51,9 @@ const (
 )
 
 type githubOAuthStateClaims struct {
-	Email string `json:"email"`
+	Email       string `json:"email"`
+	WorkspaceID int    `json:"workspace_id"`
+	RedirectURL string `json:"redirect_url,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -539,13 +541,27 @@ func GitHubAuthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	email, ok := r.Context().Value(middleware.UserEmailKey).(string)
 	if !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	state, err := createGitHubOAuthState(email, time.Now())
+	workspaceID, statusCode, err := getAuthorizedWorkspaceID(r, userID)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	redirectURL := sanitizeRedirectURL(r.URL.Query().Get("redirect_url"))
+
+	state, err := createGitHubOAuthState(email, workspaceID, redirectURL, time.Now())
 	if err != nil {
 		http.Error(w, "GitHub integration not configured", http.StatusServiceUnavailable)
 		return
@@ -589,7 +605,7 @@ func GitHubCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userEmail, err := validateGitHubOAuthState(state)
+	userEmail, workspaceID, redirectURL, err := validateGitHubOAuthState(state)
 	if err != nil {
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
@@ -597,12 +613,18 @@ func GitHubCallbackHandler(w http.ResponseWriter, r *http.Request) {
 
 	code := r.URL.Query().Get("code")
 	if code == "" {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "github", "failed") {
+			return
+		}
 		http.Error(w, "Authorization code not provided", http.StatusBadRequest)
 		return
 	}
 
 	token, err := githubExchangeCodeFunc(code)
 	if err != nil {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "github", "failed") {
+			return
+		}
 		http.Error(w, "Failed to exchange code: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -610,11 +632,33 @@ func GitHubCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	var userID int
 	err = database.DB.QueryRow("SELECT id FROM users WHERE email = ?", userEmail).Scan(&userID)
 	if err != nil {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "github", "failed") {
+			return
+		}
 		http.Error(w, "User not found", http.StatusUnauthorized)
 		return
 	}
 
-	if err := githubSaveIntegrationFunc(userID, token); err != nil {
+	role, err := middleware.GetWorkspaceRole(userID, workspaceID)
+	if err != nil {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "github", "failed") {
+			return
+		}
+		http.Error(w, "Failed to verify workspace access", http.StatusInternalServerError)
+		return
+	}
+	if role == "" {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "github", "failed") {
+			return
+		}
+		http.Error(w, "Forbidden: Not a member of this workspace", http.StatusForbidden)
+		return
+	}
+
+	if err := githubSaveIntegrationFunc(userID, workspaceID, token); err != nil {
+		if redirectOAuthResultIfPossible(w, r, redirectURL, "github", "failed") {
+			return
+		}
 		http.Error(w, "Failed to save integration: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -630,10 +674,14 @@ func GitHubCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	go func() {
-		if err := githubSyncSignalsFunc(userID); err != nil {
+		if err := githubSyncSignalsFunc(userID, workspaceID); err != nil {
 			log.Printf("Sync error: %v", err)
 		}
 	}()
+
+	if redirectOAuthResultIfPossible(w, r, redirectURL, "github", "connected") {
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "connected"})
@@ -651,12 +699,18 @@ func GitHubReposHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Method == http.MethodPatch {
-		updateGitHubRepoSelection(w, r, userID)
+	workspaceID, statusCode, err := getAuthorizedWorkspaceID(r, userID)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
 		return
 	}
 
-	repos, err := services.ListAccessibleRepos(userID)
+	if r.Method == http.MethodPatch {
+		updateGitHubRepoSelection(w, r, userID, workspaceID)
+		return
+	}
+
+	repos, err := services.ListAccessibleRepos(userID, workspaceID)
 	if err != nil {
 		http.Error(w, "Failed to fetch repos: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -678,8 +732,14 @@ func GitHubSyncHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	workspaceID, statusCode, err := getAuthorizedWorkspaceID(r, userID)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
 	go func() {
-		if err := services.SyncGitHubSignals(userID); err != nil {
+		if err := services.SyncGitHubSignals(userID, workspaceID); err != nil {
 			log.Printf("Sync error: %v", err)
 		}
 	}()
@@ -700,7 +760,13 @@ func GitHubDisconnectHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := services.DeleteGitHubIntegration(userID); err != nil {
+	workspaceID, statusCode, err := getAuthorizedWorkspaceID(r, userID)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	if err := services.DeleteGitHubIntegration(userID, workspaceID); err != nil {
 		http.Error(w, "Failed to disconnect: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -838,7 +904,7 @@ func IntegrationStatusHandler(w http.ResponseWriter, r *http.Request) {
 
 	statuses := []models.IntegrationStatus{
 		buildIntegrationStatus(userID, "slack", isSlackConfigured(), workspaceID),
-		buildIntegrationStatus(userID, "github", services.IsGitHubConfigured(), nil),
+		buildIntegrationStatus(userID, "github", services.IsGitHubConfigured(), workspaceID),
 		buildIntegrationStatus(userID, "gmail", isGmailConfigured(), nil),
 	}
 
@@ -913,7 +979,7 @@ func updateSlackChannelSelection(w http.ResponseWriter, r *http.Request, userID 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func updateGitHubRepoSelection(w http.ResponseWriter, r *http.Request, userID int) {
+func updateGitHubRepoSelection(w http.ResponseWriter, r *http.Request, userID, workspaceID int) {
 	var req struct {
 		RepoIDs []int `json:"repo_ids"`
 	}
@@ -925,7 +991,7 @@ func updateGitHubRepoSelection(w http.ResponseWriter, r *http.Request, userID in
 	if err := updateIntegrationMetadata(
 		userID,
 		"github",
-		nil,
+		&workspaceID,
 		func(metadata map[string]interface{}) {
 			metadata["selected_repo_ids"] = req.RepoIDs
 		},
@@ -1014,6 +1080,28 @@ func getUserIDFromContext(r *http.Request) (int, error) {
 	return userID, nil
 }
 
+func getAuthorizedWorkspaceID(r *http.Request, userID int) (int, int, error) {
+	workspaceIDStr := r.URL.Query().Get("workspace_id")
+	if workspaceIDStr == "" {
+		return 0, http.StatusBadRequest, fmt.Errorf("workspace_id is required")
+	}
+
+	workspaceID, err := strconv.Atoi(workspaceIDStr)
+	if err != nil {
+		return 0, http.StatusBadRequest, fmt.Errorf("invalid workspace_id")
+	}
+
+	role, err := middleware.GetWorkspaceRole(userID, workspaceID)
+	if err != nil {
+		return 0, http.StatusInternalServerError, fmt.Errorf("failed to verify workspace access")
+	}
+	if role == "" {
+		return 0, http.StatusForbidden, fmt.Errorf("forbidden: not a member of this workspace")
+	}
+
+	return workspaceID, 0, nil
+}
+
 func getSlackRedirectURI(r *http.Request) string {
 	if uri := os.Getenv("SLACK_REDIRECT_URI"); uri != "" {
 		return uri
@@ -1044,13 +1132,15 @@ func isGmailConfigured() bool {
 	return gmailClientID != "" && gmailClientSecret != "" && tokenEncryptor != nil
 }
 
-func createGitHubOAuthState(email string, now time.Time) (string, error) {
+func createGitHubOAuthState(email string, workspaceID int, redirectURL string, now time.Time) (string, error) {
 	if len(utils.JwtKey) == 0 {
 		return "", http.ErrNoCookie
 	}
 
 	claims := &githubOAuthStateClaims{
-		Email: email,
+		Email:       email,
+		WorkspaceID: workspaceID,
+		RedirectURL: sanitizeRedirectURL(redirectURL),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   email,
 			ExpiresAt: jwt.NewNumericDate(now.Add(githubOAuthStateTTL)),
@@ -1063,9 +1153,9 @@ func createGitHubOAuthState(email string, now time.Time) (string, error) {
 	return token.SignedString(utils.JwtKey)
 }
 
-func validateGitHubOAuthState(state string) (string, error) {
+func validateGitHubOAuthState(state string) (string, int, string, error) {
 	if state == "" || len(utils.JwtKey) == 0 {
-		return "", http.ErrNoCookie
+		return "", 0, "", http.ErrNoCookie
 	}
 
 	claims := &githubOAuthStateClaims{}
@@ -1076,13 +1166,13 @@ func validateGitHubOAuthState(state string) (string, error) {
 		return utils.JwtKey, nil
 	})
 	if err != nil {
-		return "", err
+		return "", 0, "", err
 	}
 	if !token.Valid || claims.Subject == "" {
-		return "", http.ErrNoCookie
+		return "", 0, "", http.ErrNoCookie
 	}
 
-	return claims.Subject, nil
+	return claims.Subject, claims.WorkspaceID, sanitizeRedirectURL(claims.RedirectURL), nil
 }
 
 func createGmailOAuthState(email, redirectURL string, now time.Time) (string, error) {
