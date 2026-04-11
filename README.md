@@ -10,6 +10,7 @@ Set these before running the server:
 Optional:
 
 - `APP_ENV`: Set to `production` (or `prod`) to enable `Secure` auth cookies.
+- `FRONTEND_BASE_URL`: Used when generating password reset links. Defaults to `http://localhost:4200`.
 
 ## Example (local development)
 
