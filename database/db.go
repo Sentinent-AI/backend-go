@@ -115,6 +115,15 @@ func InitDB() {
 			FOREIGN KEY (signal_id) REFERENCES signals(id),
 			FOREIGN KEY (user_id) REFERENCES users(id)
 		);`,
+		`CREATE TABLE IF NOT EXISTS password_reset_tokens (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			expires_at DATETIME NOT NULL,
+			used_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (user_id) REFERENCES users(id)
+		);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_external_integrations_user_provider_workspace
 			ON external_integrations(user_id, provider, COALESCE(workspace_id, 0));`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_user_source
@@ -128,6 +137,8 @@ func InitDB() {
 		`CREATE INDEX IF NOT EXISTS idx_workspace_members_user_id ON workspace_members(user_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_invitations_workspace_id ON invitations(workspace_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_invitations_email ON invitations(email);`,
+		`CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at ON password_reset_tokens(expires_at);`,
 	}
 
 	for _, statement := range statements {
