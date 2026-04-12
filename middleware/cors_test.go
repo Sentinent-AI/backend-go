@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -82,6 +83,9 @@ func TestCorsMiddlewareHandlesAllowedPreflight(t *testing.T) {
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:4200" {
 		t.Fatalf("expected allowed origin header, got %q", got)
+	}
+	if methods := rr.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(methods, "PATCH") {
+		t.Fatalf("expected PATCH in allow-methods header, got %q", methods)
 	}
 }
 
