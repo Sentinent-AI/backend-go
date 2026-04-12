@@ -61,23 +61,25 @@ func InitGitHubService() error {
 	clientSecret := strings.TrimSpace(os.Getenv("GITHUB_CLIENT_SECRET"))
 	encryptionKey := strings.TrimSpace(os.Getenv("TOKEN_ENCRYPTION_KEY"))
 
+	if encryptionKey != "" {
+		// Ensure key is 32 bytes for AES-256
+		tokenEncryptionKey = []byte(encryptionKey)
+		if len(tokenEncryptionKey) < 32 {
+			// Pad key to 32 bytes
+			paddedKey := make([]byte, 32)
+			copy(paddedKey, tokenEncryptionKey)
+			tokenEncryptionKey = paddedKey
+		} else if len(tokenEncryptionKey) > 32 {
+			tokenEncryptionKey = tokenEncryptionKey[:32]
+		}
+	}
+
 	if clientID == "" || clientSecret == "" {
 		return fmt.Errorf("GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET must be set")
 	}
 
 	if encryptionKey == "" {
 		return fmt.Errorf("TOKEN_ENCRYPTION_KEY must be set")
-	}
-
-	// Ensure key is 32 bytes for AES-256
-	tokenEncryptionKey = []byte(encryptionKey)
-	if len(tokenEncryptionKey) < 32 {
-		// Pad key to 32 bytes
-		paddedKey := make([]byte, 32)
-		copy(paddedKey, tokenEncryptionKey)
-		tokenEncryptionKey = paddedKey
-	} else if len(tokenEncryptionKey) > 32 {
-		tokenEncryptionKey = tokenEncryptionKey[:32]
 	}
 
 	githubOAuthConfig = &oauth2.Config{

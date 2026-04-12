@@ -11,9 +11,16 @@ import (
 	"sentinent-backend/utils"
 	"strings"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Attempt to load .env file; log but proceed if it fails (it might be set in environment directly in prod)
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, relying on system environment variables")
+	}
+
 	jwtSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
 	if jwtSecret == "" {
 		log.Fatal("JWT_SECRET is required")
@@ -36,6 +43,9 @@ func main() {
 	}
 	if err := services.InitGitHubService(); err != nil {
 		log.Printf("GitHub integration not configured: %v", err)
+	}
+	if err := services.InitJiraService(); err != nil {
+		log.Printf("Jira integration not configured: %v", err)
 	}
 	if tokenEncryptor, err := utils.NewTokenEncryptor(); err == nil {
 		syncService := services.NewSyncService(tokenEncryptor)
@@ -68,6 +78,7 @@ func main() {
 	mux.HandleFunc("/api/integrations/slack/callback", handlers.SlackCallback)
 	mux.HandleFunc("/api/integrations/github/callback", handlers.GitHubCallbackHandler)
 	mux.HandleFunc("/api/integrations/gmail/callback", handlers.GmailCallbackHandler)
+	mux.HandleFunc("/api/integrations/jira/callback", handlers.JiraCallbackHandler)
 
 	// Protected routes
 	protectedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +102,10 @@ func main() {
 	mux.Handle("/api/integrations/github", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubDisconnectHandler)))
 	mux.Handle("/api/integrations/gmail/auth", middleware.AuthMiddleware(http.HandlerFunc(handlers.GmailAuthHandler)))
 	mux.Handle("/api/integrations/gmail", middleware.AuthMiddleware(http.HandlerFunc(handlers.GmailDisconnectHandler)))
+	mux.Handle("/api/integrations/jira/auth", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraAuthHandler)))
+	mux.Handle("/api/integrations/jira/projects", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraProjectsHandler)))
+	mux.Handle("/api/integrations/jira/sync", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraSyncHandler)))
+	mux.Handle("/api/integrations/jira", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraDisconnectHandler)))
 	mux.Handle("/api/integrations/status", middleware.AuthMiddleware(http.HandlerFunc(handlers.IntegrationStatusHandler)))
 	mux.Handle("/api/integrations/", middleware.AuthMiddleware(http.HandlerFunc(handlers.DeleteIntegration)))
 

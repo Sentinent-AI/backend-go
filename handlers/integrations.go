@@ -228,11 +228,8 @@ func SlackCallback(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"status":  "success",
-		"message": "Slack integration connected successfully",
-	})
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<html><body style="font-family: sans-serif; text-align: center; margin-top: 50px;"><h2>Slack Connected Successfully!</h2><p>You can close this window to return to Sentinent.</p><script>setTimeout(function() { window.close(); }, 1000);</script></body></html>`))
 }
 
 func GetIntegrations(w http.ResponseWriter, r *http.Request) {
@@ -531,8 +528,8 @@ func GmailCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "connected"})
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<html><body style="font-family: sans-serif; text-align: center; margin-top: 50px;"><h2>Google Connected Successfully!</h2><p>You can close this window to return to Sentinent.</p><script>setTimeout(function() { window.close(); }, 1000);</script></body></html>`))
 }
 
 func GitHubAuthHandler(w http.ResponseWriter, r *http.Request) {
@@ -683,8 +680,8 @@ func GitHubCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "connected"})
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<html><body style="font-family: sans-serif; text-align: center; margin-top: 50px;"><h2>GitHub Connected Successfully!</h2><p>You can close this window to return to Sentinent.</p><script>setTimeout(function() { window.close(); }, 1000);</script></body></html>`))
 }
 
 func GitHubReposHandler(w http.ResponseWriter, r *http.Request) {
