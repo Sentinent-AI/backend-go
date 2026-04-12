@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"sentinent-backend/database"
+	"sentinent-backend/middleware"
 	"sentinent-backend/models"
 	"sentinent-backend/services"
 	"sentinent-backend/utils"
@@ -33,6 +34,15 @@ type resetPasswordRequest struct {
 	Password string `json:"password"`
 }
 
+type profileUpdateRequest struct {
+	FullName     string `json:"full_name"`
+	JobTitle     string `json:"job_title"`
+	Organization string `json:"organization"`
+	Timezone     string `json:"timezone"`
+	Bio          string `json:"bio"`
+	RoleLabel    string `json:"role_label"`
+}
+
 func Signup(w http.ResponseWriter, r *http.Request) {
 	var user models.User
 	err := json.NewDecoder(r.Body).Decode(&user)
@@ -46,13 +56,32 @@ func Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user.Email = strings.TrimSpace(user.Email)
+	user.FullName = strings.TrimSpace(user.FullName)
+	user.JobTitle = strings.TrimSpace(user.JobTitle)
+	user.Organization = strings.TrimSpace(user.Organization)
+	user.Timezone = strings.TrimSpace(user.Timezone)
+	user.Bio = strings.TrimSpace(user.Bio)
+	user.RoleLabel = strings.TrimSpace(user.RoleLabel)
+
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	_, err = database.DB.Exec("INSERT INTO users (email, password) VALUES (?, ?)", user.Email, string(hashedPassword))
+	_, err = database.DB.Exec(
+		`INSERT INTO users (email, password, full_name, job_title, organization, timezone, bio, role_label)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		user.Email,
+		string(hashedPassword),
+		user.FullName,
+		user.JobTitle,
+		user.Organization,
+		user.Timezone,
+		user.Bio,
+		user.RoleLabel,
+	)
 	if err != nil {
 		http.Error(w, "Email already exists", http.StatusConflict)
 		return
@@ -310,6 +339,97 @@ func ResetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func ProfileHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		getProfile(w, r)
+	case http.MethodPatch:
+		updateProfile(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func getProfile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r.Context())
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var user models.User
+	err := database.DB.QueryRow(
+		`SELECT id, email, full_name, job_title, organization, timezone, bio, role_label
+		 FROM users WHERE id = ?`,
+		userID,
+	).Scan(
+		&user.ID,
+		&user.Email,
+		&user.FullName,
+		&user.JobTitle,
+		&user.Organization,
+		&user.Timezone,
+		&user.Bio,
+		&user.RoleLabel,
+	)
+	if err == sql.ErrNoRows {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Failed to load profile", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(user)
+}
+
+func updateProfile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r.Context())
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req profileUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	req.FullName = strings.TrimSpace(req.FullName)
+	req.JobTitle = strings.TrimSpace(req.JobTitle)
+	req.Organization = strings.TrimSpace(req.Organization)
+	req.Timezone = strings.TrimSpace(req.Timezone)
+	req.Bio = strings.TrimSpace(req.Bio)
+	req.RoleLabel = strings.TrimSpace(req.RoleLabel)
+
+	if req.FullName == "" {
+		http.Error(w, "Full name is required", http.StatusBadRequest)
+		return
+	}
+
+	_, err := database.DB.Exec(
+		`UPDATE users
+		 SET full_name = ?, job_title = ?, organization = ?, timezone = ?, bio = ?, role_label = ?
+		 WHERE id = ?`,
+		req.FullName,
+		req.JobTitle,
+		req.Organization,
+		req.Timezone,
+		req.Bio,
+		req.RoleLabel,
+		userID,
+	)
+	if err != nil {
+		http.Error(w, "Failed to update profile", http.StatusInternalServerError)
+		return
+	}
+
+	getProfile(w, r)
 }
 
 func isProductionEnv() bool {

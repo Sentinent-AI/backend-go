@@ -83,15 +83,28 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		userID := claims.UserID
-		if userID == 0 && claims.Email != "" && database.DB != nil {
-			err = database.DB.QueryRow("SELECT id FROM users WHERE email = ?", claims.Email).Scan(&userID)
-			if err == sql.ErrNoRows {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
+		if database.DB != nil {
+			if userID != 0 {
+				if err := database.DB.QueryRow("SELECT id FROM users WHERE id = ?", userID).Scan(&userID); err == sql.ErrNoRows {
+					// Recover from stale user IDs in older tokens by falling back to email lookup.
+					userID = 0
+				} else if err != nil {
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
+				}
 			}
-			if err != nil {
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-				return
+
+			if userID == 0 && claims.Email != "" {
+				err = database.DB.QueryRow("SELECT id FROM users WHERE email = ?", claims.Email).Scan(&userID)
+				if err == sql.ErrNoRows {
+					if claims.UserID != 0 {
+						http.Error(w, "Unauthorized", http.StatusUnauthorized)
+						return
+					}
+				} else if err != nil {
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
+				}
 			}
 		}
 

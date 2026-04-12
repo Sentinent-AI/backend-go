@@ -21,7 +21,13 @@ func InitDB() {
 		`CREATE TABLE IF NOT EXISTS users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			email TEXT NOT NULL UNIQUE,
-			password TEXT NOT NULL
+			password TEXT NOT NULL,
+			full_name TEXT DEFAULT '',
+			job_title TEXT DEFAULT '',
+			organization TEXT DEFAULT '',
+			timezone TEXT DEFAULT '',
+			bio TEXT DEFAULT '',
+			role_label TEXT DEFAULT ''
 		);`,
 		`CREATE TABLE IF NOT EXISTS workspaces (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,6 +159,12 @@ func InitDB() {
 	ensureColumn("external_integrations", "metadata", "TEXT")
 
 	ensureColumn("workspaces", "description", "TEXT DEFAULT ''")
+	ensureColumn("users", "full_name", "TEXT DEFAULT ''")
+	ensureColumn("users", "job_title", "TEXT DEFAULT ''")
+	ensureColumn("users", "organization", "TEXT DEFAULT ''")
+	ensureColumn("users", "timezone", "TEXT DEFAULT ''")
+	ensureColumn("users", "bio", "TEXT DEFAULT ''")
+	ensureColumn("users", "role_label", "TEXT DEFAULT ''")
 
 	ensureColumn("signals", "workspace_id", "INTEGER")
 	ensureColumn("signals", "external_id", "TEXT")
