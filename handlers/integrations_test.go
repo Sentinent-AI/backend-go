@@ -761,7 +761,8 @@ func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
 		 VALUES
 			(7, 1, 9, 'slack', 'token-7', '{"team":"workspace-9"}'),
 			(8, 1, 9, 'github', 'token-8', '{"scope":"workspace"}'),
-			(9, 1, NULL, 'gmail', 'token-9', '{"email":"mailbox@example.com"}')`,
+			(9, 1, NULL, 'gmail', 'token-9', '{"email":"mailbox@example.com"}'),
+			(10, 1, 9, 'jira', 'token-10', '{}')`,
 	); err != nil {
 		t.Fatalf("failed to seed integration statuses: %v", err)
 	}
@@ -804,11 +805,11 @@ func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
 		t.Fatalf("failed to decode integration statuses: %v", err)
 	}
 
-	if len(statuses) != 3 {
-		t.Fatalf("expected 3 statuses, got %d", len(statuses))
+	if len(statuses) != 4 {
+		t.Fatalf("expected 4 statuses, got %d", len(statuses))
 	}
 
-	var slackStatus, githubStatus, gmailStatus *models.IntegrationStatus
+	var slackStatus, githubStatus, gmailStatus, jiraStatus *models.IntegrationStatus
 	for i := range statuses {
 		switch statuses[i].Provider {
 		case "slack":
@@ -817,6 +818,8 @@ func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
 			githubStatus = &statuses[i]
 		case "gmail":
 			gmailStatus = &statuses[i]
+		case "jira":
+			jiraStatus = &statuses[i]
 		}
 	}
 
@@ -828,5 +831,8 @@ func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
 	}
 	if gmailStatus == nil || !gmailStatus.Configured || !gmailStatus.Connected {
 		t.Fatalf("expected configured and connected gmail status, got %+v", gmailStatus)
+	}
+	if jiraStatus == nil || !jiraStatus.Connected {
+		t.Fatalf("expected connected jira status, got %+v", jiraStatus)
 	}
 }

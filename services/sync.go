@@ -118,6 +118,20 @@ func (s *SyncService) syncAllIntegrations() {
 		switch record.integration.Provider {
 		case "slack":
 			s.syncSlackIntegration(&record.integration, accessToken)
+		case "github":
+			// GitHub sync uses its own token management via GetGitHubClient
+			go func(userID, workspaceID int) {
+				if err := SyncGitHubSignals(userID, workspaceID); err != nil {
+					log.Printf("Background GitHub sync error for user %d workspace %d: %v", userID, workspaceID, err)
+				}
+			}(record.integration.UserID, record.integration.WorkspaceID)
+		case "jira":
+			// Jira sync uses its own token management via GetJiraClient (with refresh)
+			go func(userID, workspaceID int) {
+				if err := SyncJiraSignals(userID, workspaceID); err != nil {
+					log.Printf("Background Jira sync error for user %d workspace %d: %v", userID, workspaceID, err)
+				}
+			}(record.integration.UserID, record.integration.WorkspaceID)
 		default:
 			log.Printf("Unknown provider: %s", record.integration.Provider)
 		}
