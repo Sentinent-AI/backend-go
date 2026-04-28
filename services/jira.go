@@ -36,7 +36,7 @@ type JiraIssue struct {
 	ID     string `json:"id"`
 	Key    string `json:"key"`
 	Fields struct {
-		Summary     string `json:"summary"`
+		Summary     string      `json:"summary"`
 		Description interface{} `json:"description"`
 		Status      struct {
 			Name string `json:"name"`
@@ -358,7 +358,7 @@ func parseADFToText(node interface{}) string {
 	}
 
 	nodeType, _ := m["type"].(string)
-	
+
 	var sb strings.Builder
 
 	if nodeType == "text" {
@@ -391,9 +391,9 @@ func formatDescription(desc interface{}) string {
 	if desc == nil {
 		return ""
 	}
-	
+
 	text := strings.TrimSpace(parseADFToText(desc))
-	
+
 	if len(text) > 500 {
 		return text[:500] + "..."
 	}
@@ -435,7 +435,7 @@ type JiraTransition struct {
 // GetAvailableTransitions fetches transitions for a specific issue
 func GetAvailableTransitions(client *http.Client, cloudId string, issueKey string) ([]JiraTransition, error) {
 	apiURL := fmt.Sprintf("https://api.atlassian.com/ex/jira/%s/rest/api/3/issue/%s/transitions", cloudId, issueKey)
-	
+
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return nil, err
@@ -466,7 +466,7 @@ func GetAvailableTransitions(client *http.Client, cloudId string, issueKey strin
 // PerformTransition executes a status change on a specific issue
 func PerformTransition(client *http.Client, cloudId string, issueKey string, transitionID string) error {
 	apiURL := fmt.Sprintf("https://api.atlassian.com/ex/jira/%s/rest/api/3/issue/%s/transitions", cloudId, issueKey)
-	
+
 	requestBody, _ := json.Marshal(map[string]interface{}{
 		"transition": map[string]string{
 			"id": transitionID,
@@ -498,12 +498,12 @@ func PerformTransition(client *http.Client, cloudId string, issueKey string, tra
 // AddJiraComment adds a comment to a specific issue
 func AddJiraComment(client *http.Client, cloudId string, issueKey string, commentText string) error {
 	apiURL := fmt.Sprintf("https://api.atlassian.com/ex/jira/%s/rest/api/3/issue/%s/comment", cloudId, issueKey)
-	
+
 	// Jira API v3 expects ADF for comments.
 	requestBody, _ := json.Marshal(map[string]interface{}{
 		"body": map[string]interface{}{
 			"version": 1,
-			"type": "doc",
+			"type":    "doc",
 			"content": []map[string]interface{}{
 				{
 					"type": "paragraph",
@@ -582,7 +582,7 @@ func saveJiraIssueAsSignal(userID, workspaceID int, issue JiraIssue, cloudURL st
 	if issue.Fields.Priority != nil {
 		priorityName = issue.Fields.Priority.Name
 	}
-	
+
 	assigneeName := ""
 	if issue.Fields.Assignee != nil {
 		assigneeName = issue.Fields.Assignee.DisplayName
@@ -609,10 +609,10 @@ func saveJiraIssueAsSignal(userID, workspaceID int, issue JiraIssue, cloudURL st
 	updatedAt := parseJiraDate(issue.Fields.Updated)
 
 	// Since SourceMetadata in models.Signal is strongly typed to GitHubMetadata for now,
-	// we will likely store Jira metadata in a new field or JSON encode it into the body to be generic. 
+	// we will likely store Jira metadata in a new field or JSON encode it into the body to be generic.
 	// Wait, the model update we applied added JiraMetadata but didn't modify Signal struct's SourceMetadata type!
 	// We might need to change it to interface{} or add JiraMetadata *JiraMetadata
-	
+
 	// But let's just save it.
 	_, err := database.DB.Exec(
 		`INSERT INTO signals
