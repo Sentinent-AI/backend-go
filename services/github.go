@@ -283,6 +283,19 @@ func FetchAssignedIssues(userID, workspaceID int) ([]GitHubIssue, error) {
 	})
 }
 
+// FetchRepoIssues fetches all issues for a specific repository
+func FetchRepoIssues(userID, workspaceID int, repoFullName string) ([]GitHubIssue, error) {
+	client, err := GetGitHubClient(userID, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	return fetchGitHubIssues(client, fmt.Sprintf("repos/%s/issues", repoFullName), map[string]string{
+		"state": "all",
+		"sort":  "updated",
+	})
+}
+
 // fetchGitHubIssues fetches issues or PRs from GitHub API with pagination
 func fetchGitHubIssues(client *http.Client, endpoint string, params map[string]string) ([]GitHubIssue, error) {
 	var allIssues []GitHubIssue
@@ -369,17 +382,78 @@ func splitGitHubIssuesAndPullRequests(items []GitHubIssue) ([]GitHubIssue, []Git
 
 // SyncGitHubSignals syncs GitHub issues and PRs to signals
 func SyncGitHubSignals(userID, workspaceID int) error {
-	items, err := FetchAssignedIssues(userID, workspaceID)
+	integration, err := GetGitHubIntegration(userID, workspaceID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch issues: %w", err)
+		return fmt.Errorf("failed to get integration: %w", err)
 	}
 
-	issues, prs := splitGitHubIssuesAndPullRequests(items)
+	var metadata map[string]interface{}
+	if integration.Metadata != "" {
+		json.Unmarshal([]byte(integration.Metadata), &metadata)
+	}
+
+	var allItems []GitHubIssue
+
+	// 1. Fetch assigned issues (standard behavior)
+	assigned, err := FetchAssignedIssues(userID, workspaceID)
+	if err == nil {
+		allItems = append(allItems, assigned...)
+	}
+
+	// 2. Fetch issues from selected repositories
+	selectedRepoIDs, _ := metadata["selected_repo_ids"].([]interface{})
+	if len(selectedRepoIDs) > 0 {
+		repos, err := ListAccessibleRepos(userID, workspaceID)
+		if err == nil {
+			for _, repoIDInterface := range selectedRepoIDs {
+				var id int64
+				switch v := repoIDInterface.(type) {
+				case float64:
+					id = int64(v)
+				case int64:
+					id = v
+				case int:
+					id = int64(v)
+				default:
+					continue
+				}
+
+				for _, r := range repos {
+					rIDFloat, ok := r["id"].(float64)
+					if !ok {
+						continue
+					}
+					if int64(rIDFloat) == id {
+						fullName, ok := r["full_name"].(string)
+						if ok {
+							repoIssues, err := FetchRepoIssues(userID, workspaceID, fullName)
+							if err == nil {
+								allItems = append(allItems, repoIssues...)
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Deduplicate items by GitHub ID
+	uniqueMap := make(map[int64]GitHubIssue)
+	for _, item := range allItems {
+		uniqueMap[item.ID] = item
+	}
+
+	var uniqueItems []GitHubIssue
+	for _, item := range uniqueMap {
+		uniqueItems = append(uniqueItems, item)
+	}
+
+	issues, prs := splitGitHubIssuesAndPullRequests(uniqueItems)
 
 	// Save issues as signals
 	for _, issue := range issues {
 		if err := saveGitHubSignal(userID, workspaceID, issue, "issue"); err != nil {
-			// Log error but continue with other items
 			fmt.Printf("Failed to save issue signal: %v\n", err)
 		}
 	}
@@ -596,4 +670,74 @@ func ListAccessibleRepos(userID, workspaceID int) ([]map[string]interface{}, err
 	}
 
 	return allRepos, nil
+}
+
+// AddGitHubComment adds a comment to a GitHub issue or PR
+func AddGitHubComment(userID, workspaceID int, repo string, number int, body string) error {
+	client, err := GetGitHubClient(userID, workspaceID)
+	if err != nil {
+		return err
+	}
+
+	u := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d/comments", repo, number)
+	payload := map[string]string{"body": body}
+	payloadJSON, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", u, strings.NewReader(string(payloadJSON)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitHub API error: %d - %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// UpdateGitHubIssueState updates the state of a GitHub issue or PR (open/closed)
+func UpdateGitHubIssueState(userID, workspaceID int, repo string, number int, state string) error {
+	client, err := GetGitHubClient(userID, workspaceID)
+	if err != nil {
+		return err
+	}
+
+	u := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d", repo, number)
+	payload := map[string]string{"state": state}
+	payloadJSON, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("PATCH", u, strings.NewReader(string(payloadJSON)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitHub API error: %d - %s", resp.StatusCode, string(respBody))
+	}
+
+	// Update local signal state if it exists
+	_, _ = database.DB.Exec(
+		`UPDATE signals SET status = ? WHERE user_id = ? AND workspace_id = ? AND source_type = 'github' AND source_metadata LIKE ?`,
+		state, userID, workspaceID, fmt.Sprintf("%%\"number\":%d%%", number),
+	)
+
+	return nil
 }
