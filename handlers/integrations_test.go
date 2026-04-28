@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"sentinent-backend/models"
 	"sentinent-backend/services"
 	"sentinent-backend/utils"
+	"strings"
 	"testing"
 	"time"
 
@@ -834,5 +836,79 @@ func TestIntegrationStatusHandlerReturnsConnectionState(t *testing.T) {
 	}
 	if jiraStatus == nil || !jiraStatus.Connected {
 		t.Fatalf("expected connected jira status, got %+v", jiraStatus)
+	}
+}
+
+func TestGitHubAddCommentHandlerRejectsInvalidRequest(t *testing.T) {
+	setupIntegrationsTestDB(t)
+	defer database.DB.Close()
+
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "invalid issue number",
+			path: "/api/integrations/github/issues/0/comments?workspace_id=9",
+			body: `{"repo":"Sentinent-AI/backend-go","body":"Looks good"}`,
+		},
+		{
+			name: "missing repo",
+			path: "/api/integrations/github/issues/12/comments?workspace_id=9",
+			body: `{"repo":"","body":"Looks good"}`,
+		},
+		{
+			name: "missing body",
+			path: "/api/integrations/github/issues/12/comments?workspace_id=9",
+			body: `{"repo":"Sentinent-AI/backend-go","body":"   "}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := integrationRequestWithUser(http.MethodPost, tt.path, "reader@example.com")
+			req.Body = io.NopCloser(strings.NewReader(tt.body))
+			rr := httptest.NewRecorder()
+
+			GitHubAddCommentHandler(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestGitHubUpdateStateHandlerRejectsInvalidRequest(t *testing.T) {
+	setupIntegrationsTestDB(t)
+	defer database.DB.Close()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing repo",
+			body: `{"repo":"","state":"closed"}`,
+		},
+		{
+			name: "invalid state",
+			body: `{"repo":"Sentinent-AI/backend-go","state":"merged"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := integrationRequestWithUser(http.MethodPatch, "/api/integrations/github/issues/12/state?workspace_id=9", "reader@example.com")
+			req.Body = io.NopCloser(strings.NewReader(tt.body))
+			rr := httptest.NewRecorder()
+
+			GitHubUpdateStateHandler(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+		})
 	}
 }

@@ -825,7 +825,7 @@ func GitHubAddCommentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	number, err := strconv.Atoi(pathParts[5])
-	if err != nil {
+	if err != nil || number <= 0 {
 		http.Error(w, "Invalid issue number", http.StatusBadRequest)
 		return
 	}
@@ -836,6 +836,16 @@ func GitHubAddCommentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	req.Repo = strings.TrimSpace(req.Repo)
+	req.Body = strings.TrimSpace(req.Body)
+	if !isValidGitHubRepoFullName(req.Repo) {
+		http.Error(w, "Invalid GitHub repository", http.StatusBadRequest)
+		return
+	}
+	if req.Body == "" {
+		http.Error(w, "Comment body is required", http.StatusBadRequest)
 		return
 	}
 
@@ -872,7 +882,7 @@ func GitHubUpdateStateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	number, err := strconv.Atoi(pathParts[5])
-	if err != nil {
+	if err != nil || number <= 0 {
 		http.Error(w, "Invalid issue number", http.StatusBadRequest)
 		return
 	}
@@ -885,6 +895,16 @@ func GitHubUpdateStateHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	req.Repo = strings.TrimSpace(req.Repo)
+	req.State = strings.TrimSpace(req.State)
+	if !isValidGitHubRepoFullName(req.Repo) {
+		http.Error(w, "Invalid GitHub repository", http.StatusBadRequest)
+		return
+	}
+	if req.State != "open" && req.State != "closed" {
+		http.Error(w, "Invalid GitHub issue state", http.StatusBadRequest)
+		return
+	}
 
 	if err := services.UpdateGitHubIssueState(userID, workspaceID, req.Repo, number, req.State); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -892,6 +912,12 @@ func GitHubUpdateStateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func isValidGitHubRepoFullName(repo string) bool {
+	owner, name, ok := strings.Cut(repo, "/")
+	return ok && strings.TrimSpace(owner) != "" && strings.TrimSpace(name) != "" &&
+		!strings.ContainsAny(owner, " \t\r\n") && !strings.ContainsAny(name, " \t\r\n/")
 }
 
 func GmailDisconnectHandler(w http.ResponseWriter, r *http.Request) {
