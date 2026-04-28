@@ -100,6 +100,17 @@ func main() {
 	mux.Handle("/api/integrations/github/auth", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubAuthHandler)))
 	mux.Handle("/api/integrations/github/repos", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubReposHandler)))
 	mux.Handle("/api/integrations/github/sync", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubSyncHandler)))
+	mux.Handle("/api/integrations/github/issues/", middleware.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/comments"):
+			handlers.GitHubAddCommentHandler(w, r)
+		case r.Method == http.MethodPatch && strings.HasSuffix(path, "/state"):
+			handlers.GitHubUpdateStateHandler(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
 	mux.Handle("/api/integrations/github", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubDisconnectHandler)))
 	mux.Handle("/api/integrations/gmail/auth", middleware.AuthMiddleware(http.HandlerFunc(handlers.GmailAuthHandler)))
 	mux.Handle("/api/integrations/gmail", middleware.AuthMiddleware(http.HandlerFunc(handlers.GmailDisconnectHandler)))

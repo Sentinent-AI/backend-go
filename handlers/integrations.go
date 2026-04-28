@@ -800,6 +800,100 @@ func GitHubDisconnectHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "disconnected"})
 }
 
+func GitHubAddCommentHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	workspaceID, statusCode, err := getAuthorizedWorkspaceID(r, userID)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	// URL format: /api/integrations/github/issues/{number}/comments
+	pathParts := strings.Split(r.URL.Path, "/")
+	if len(pathParts) < 6 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	number, err := strconv.Atoi(pathParts[5])
+	if err != nil {
+		http.Error(w, "Invalid issue number", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Repo string `json:"repo"`
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := services.AddGitHubComment(userID, workspaceID, req.Repo, number, req.Body); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+}
+
+func GitHubUpdateStateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	workspaceID, statusCode, err := getAuthorizedWorkspaceID(r, userID)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	// URL format: /api/integrations/github/issues/{number}/state
+	pathParts := strings.Split(r.URL.Path, "/")
+	if len(pathParts) < 6 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	number, err := strconv.Atoi(pathParts[5])
+	if err != nil {
+		http.Error(w, "Invalid issue number", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Repo  string `json:"repo"`
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := services.UpdateGitHubIssueState(userID, workspaceID, req.Repo, number, req.State); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func GmailDisconnectHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
