@@ -21,6 +21,12 @@ jobs:
     - name: Install dependencies
       run: go mod tidy
 
+    - name: Check formatting
+      run: test -z "$(gofmt -l .)"
+
+    - name: Vet
+      run: go vet ./...
+
     - name: Run Tests
       run: go test -v ./...
 

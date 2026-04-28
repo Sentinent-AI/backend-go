@@ -372,10 +372,10 @@ func JiraIssueActionHandler(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Failed to perform transition: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			
+
 			// Optional: Trigger a background sync to reflect changes quickly
 			go services.SyncJiraSignals(userID, workspaceID)
-			
+
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
