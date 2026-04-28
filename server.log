@@ -1,0 +1,4 @@
+2026/04/27 19:22:40 GitHub integration not configured: GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET must be set
+2026/04/27 19:22:40 Sync service started with interval: 5m0s
+2026/04/27 19:22:40 Server started on :8080
+exit status 1
