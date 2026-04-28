@@ -71,6 +71,7 @@ func validateJiraOAuthState(state string) (string, int, string, error) {
 }
 
 func JiraAuthHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("JiraAuthHandler called: %s", r.URL.String())
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
