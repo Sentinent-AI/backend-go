@@ -44,6 +44,11 @@ type profileUpdateRequest struct {
 }
 
 func Signup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	var user models.User
 	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
@@ -51,12 +56,16 @@ func Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user.Email = strings.TrimSpace(user.Email)
 	if !utils.IsEmailValid(user.Email) {
 		http.Error(w, "Invalid email format", http.StatusBadRequest)
 		return
 	}
+	if len(user.Password) < 8 {
+		http.Error(w, "Password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
 
-	user.Email = strings.TrimSpace(user.Email)
 	user.FullName = strings.TrimSpace(user.FullName)
 	user.JobTitle = strings.TrimSpace(user.JobTitle)
 	user.Organization = strings.TrimSpace(user.Organization)
@@ -91,6 +100,11 @@ func Signup(w http.ResponseWriter, r *http.Request) {
 }
 
 func Signin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	var creds models.User
 	err := json.NewDecoder(r.Body).Decode(&creds)
 	if err != nil {
@@ -98,6 +112,7 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	creds.Email = strings.TrimSpace(creds.Email)
 	if !utils.IsEmailValid(creds.Email) {
 		http.Error(w, "Invalid email format", http.StatusBadRequest)
 		return
