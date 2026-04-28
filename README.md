@@ -11,6 +11,7 @@ Optional:
 
 - `APP_ENV`: Set to `production` (or `prod`) to enable `Secure` auth cookies.
 - `API_BASE_URL`: Public backend base URL used for Jira OAuth callbacks. Defaults to `http://localhost:8080`.
+- `DATABASE_PATH`: SQLite database path. Defaults to `./sentinent.db`.
 - `FRONTEND_BASE_URL`: Used when generating password reset links. Defaults to `http://localhost:4200`.
 
 Token encryption:
