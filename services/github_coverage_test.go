@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/oauth2"
 	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/oauth2"
 )
 
 func setupGitHubCoverageTestDB(t *testing.T) func() {
@@ -273,4 +273,3 @@ func TestFetchAssignedIssuesAndListAccessibleReposWithLocalGitHubServer(t *testi
 		t.Fatalf("unexpected repo payload: %+v", repos[0])
 	}
 }
-
