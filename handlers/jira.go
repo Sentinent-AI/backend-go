@@ -71,6 +71,7 @@ func validateJiraOAuthState(state string) (string, int, string, error) {
 }
 
 func JiraAuthHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("JiraAuthHandler called: %s", r.URL.String())
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -277,7 +278,7 @@ func JiraDisconnectHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "disconnected"})
 }
 
-// JiraProjectsHandler just returns resources as a mock "projects" list or can fetch projects from a cloud id.
+// JiraProjectsHandler returns Jira projects visible to the connected account.
 func JiraProjectsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -302,12 +303,12 @@ func JiraProjectsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resources, err := services.FetchAtlassianResources(client)
+	projects, err := services.FetchJiraProjects(client)
 	if err != nil {
-		http.Error(w, "Failed to fetch Atlassian resources: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Failed to fetch Jira projects: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resources)
+	_ = json.NewEncoder(w).Encode(projects)
 }
