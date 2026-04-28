@@ -35,7 +35,9 @@ func main() {
 		log.Fatalf("invalid CORS_ALLOWED_ORIGINS: %v", err)
 	}
 
-	database.InitDB()
+	if err := database.InitDB(); err != nil {
+		log.Fatalf("failed to initialize database: %v", err)
+	}
 
 	// Initialize optional integration providers.
 	if err := handlers.InitIntegrationHandlers(); err != nil {
