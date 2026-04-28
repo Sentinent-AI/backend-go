@@ -17,10 +17,6 @@ func InitDB() {
 		log.Fatal(err)
 	}
 
-	if _, err := DB.Exec("PRAGMA journal_mode=WAL;"); err != nil {
-		log.Printf("Failed to enable WAL mode: %v", err)
-	}
-
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
