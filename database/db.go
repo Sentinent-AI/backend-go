@@ -3,18 +3,36 @@ package database
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"os"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 var DB *sql.DB
 
-func InitDB() {
-	var err error
-	DB, err = sql.Open("sqlite3", "./sentinent.db")
+const defaultDBPath = "./sentinent.db"
+
+func InitDB() error {
+	return InitDBWithPath(strings.TrimSpace(os.Getenv("DATABASE_PATH")))
+}
+
+func InitDBWithPath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		path = defaultDBPath
+	}
+
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("open database: %w", err)
+	}
+
+	previousDB := DB
+	DB = db
+	if err := configureSQLite(); err != nil {
+		DB = previousDB
+		_ = db.Close()
+		return err
 	}
 
 	statements := []string{
@@ -149,48 +167,89 @@ func InitDB() {
 
 	for _, statement := range statements {
 		if _, err := DB.Exec(statement); err != nil {
-			log.Fatal(err)
+			DB = previousDB
+			_ = db.Close()
+			return fmt.Errorf("run schema statement: %w", err)
 		}
 	}
 
-	ensureColumn("external_integrations", "workspace_id", "INTEGER")
-	ensureColumn("external_integrations", "refresh_token", "TEXT")
-	ensureColumn("external_integrations", "expires_at", "DATETIME")
-	ensureColumn("external_integrations", "metadata", "TEXT")
-
-	ensureColumn("workspaces", "description", "TEXT DEFAULT ''")
-	ensureColumn("users", "full_name", "TEXT DEFAULT ''")
-	ensureColumn("users", "job_title", "TEXT DEFAULT ''")
-	ensureColumn("users", "organization", "TEXT DEFAULT ''")
-	ensureColumn("users", "timezone", "TEXT DEFAULT ''")
-	ensureColumn("users", "bio", "TEXT DEFAULT ''")
-	ensureColumn("users", "role_label", "TEXT DEFAULT ''")
-
-	ensureColumn("signals", "workspace_id", "INTEGER")
-	ensureColumn("signals", "external_id", "TEXT")
-	ensureColumn("signals", "content", "TEXT")
-	ensureColumn("signals", "author", "TEXT")
-	ensureColumn("signals", "body", "TEXT")
-	ensureColumn("signals", "url", "TEXT")
-	ensureColumn("signals", "source_metadata", "TEXT")
-	ensureColumn("signals", "received_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
-	ensureColumn("signals", "updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
+	columns := []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{"external_integrations", "workspace_id", "INTEGER"},
+		{"external_integrations", "refresh_token", "TEXT"},
+		{"external_integrations", "expires_at", "DATETIME"},
+		{"external_integrations", "metadata", "TEXT"},
+		{"workspaces", "description", "TEXT DEFAULT ''"},
+		{"users", "full_name", "TEXT DEFAULT ''"},
+		{"users", "job_title", "TEXT DEFAULT ''"},
+		{"users", "organization", "TEXT DEFAULT ''"},
+		{"users", "timezone", "TEXT DEFAULT ''"},
+		{"users", "bio", "TEXT DEFAULT ''"},
+		{"users", "role_label", "TEXT DEFAULT ''"},
+		{"signals", "workspace_id", "INTEGER"},
+		{"signals", "external_id", "TEXT"},
+		{"signals", "content", "TEXT"},
+		{"signals", "author", "TEXT"},
+		{"signals", "body", "TEXT"},
+		{"signals", "url", "TEXT"},
+		{"signals", "source_metadata", "TEXT"},
+		{"signals", "received_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"},
+		{"signals", "updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"},
+	}
+	for _, column := range columns {
+		if err := ensureColumn(column.table, column.name, column.definition); err != nil {
+			DB = previousDB
+			_ = db.Close()
+			return err
+		}
+	}
 
 	if _, err := DB.Exec(`CREATE INDEX IF NOT EXISTS idx_decisions_workspace_id ON decisions(workspace_id);`); err != nil {
-		log.Fatal(err)
+		DB = previousDB
+		_ = db.Close()
+		return fmt.Errorf("create decisions workspace index: %w", err)
 	}
 	if _, err := DB.Exec(`CREATE INDEX IF NOT EXISTS idx_decisions_user_id ON decisions(user_id);`); err != nil {
-		log.Fatal(err)
+		DB = previousDB
+		_ = db.Close()
+		return fmt.Errorf("create decisions user index: %w", err)
 	}
 
-	ensureWorkspaceOwnerMemberships()
-	cleanupOrphanIntegrations()
+	if err := ensureWorkspaceOwnerMemberships(); err != nil {
+		DB = previousDB
+		_ = db.Close()
+		return err
+	}
+	if err := cleanupOrphanIntegrations(); err != nil {
+		DB = previousDB
+		_ = db.Close()
+		return err
+	}
+
+	return nil
 }
 
-func ensureColumn(tableName, columnName, columnDefinition string) {
+func configureSQLite() error {
+	statements := []string{
+		"PRAGMA foreign_keys = ON",
+		"PRAGMA busy_timeout = 5000",
+		"PRAGMA journal_mode = WAL",
+	}
+	for _, statement := range statements {
+		if _, err := DB.Exec(statement); err != nil {
+			return fmt.Errorf("configure sqlite %q: %w", statement, err)
+		}
+	}
+	return nil
+}
+
+func ensureColumn(tableName, columnName, columnDefinition string) error {
 	rows, err := DB.Query(fmt.Sprintf("PRAGMA table_info(%s)", tableName))
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("inspect table %s: %w", tableName, err)
 	}
 	defer rows.Close()
 
@@ -204,11 +263,14 @@ func ensureColumn(tableName, columnName, columnDefinition string) {
 			pk         int
 		)
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &pk); err != nil {
-			log.Fatal(err)
+			return fmt.Errorf("scan table %s column info: %w", tableName, err)
 		}
 		if name == columnName {
-			return
+			return nil
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate table %s columns: %w", tableName, err)
 	}
 
 	statement := fmt.Sprintf(
@@ -218,11 +280,12 @@ func ensureColumn(tableName, columnName, columnDefinition string) {
 		columnDefinition,
 	)
 	if _, err := DB.Exec(statement); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("add column %s.%s: %w", tableName, columnName, err)
 	}
+	return nil
 }
 
-func ensureWorkspaceOwnerMemberships() {
+func ensureWorkspaceOwnerMemberships() error {
 	if _, err := DB.Exec(`
 		INSERT INTO workspace_members (workspace_id, user_id, role, updated_at)
 		SELECT w.id, w.owner_id, 'owner', CURRENT_TIMESTAMP
@@ -232,7 +295,7 @@ func ensureWorkspaceOwnerMemberships() {
 			WHERE wm.workspace_id = w.id AND wm.user_id = w.owner_id
 		)
 	`); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("ensure owner memberships: %w", err)
 	}
 
 	if _, err := DB.Exec(`
@@ -243,7 +306,7 @@ func ensureWorkspaceOwnerMemberships() {
 		)
 		AND role != 'owner'
 	`); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("restore owner roles: %w", err)
 	}
 
 	if _, err := DB.Exec(`
@@ -257,15 +320,16 @@ func ensureWorkspaceOwnerMemberships() {
 			    AND w.owner_id <> workspace_members.user_id
 		  )
 	`); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("demote stale owner roles: %w", err)
 	}
+	return nil
 }
 
 // cleanupOrphanIntegrations removes integration records with NULL or 0 workspace_id
 // when a valid workspace-scoped record exists for the same user and provider.
 // This prevents duplicate records from confusing the GetIntegrations query which
 // includes `workspace_id IS NULL` results alongside workspace-scoped ones.
-func cleanupOrphanIntegrations() {
+func cleanupOrphanIntegrations() error {
 	result, err := DB.Exec(`
 		DELETE FROM external_integrations
 		WHERE (workspace_id IS NULL OR workspace_id = 0)
@@ -279,10 +343,8 @@ func cleanupOrphanIntegrations() {
 		  )
 	`)
 	if err != nil {
-		log.Printf("Warning: failed to clean up orphan integrations: %v", err)
-		return
+		return fmt.Errorf("clean up orphan integrations: %w", err)
 	}
-	if affected, _ := result.RowsAffected(); affected > 0 {
-		log.Printf("Cleaned up %d orphan integration records", affected)
-	}
+	_, _ = result.RowsAffected()
+	return nil
 }
