@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"sentinent-backend/database"
@@ -310,4 +311,92 @@ func JiraProjectsHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resources)
+}
+
+func JiraIssueActionHandler(w http.ResponseWriter, r *http.Request) {
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	workspaceID, statusCode, err := getAuthorizedWorkspaceID(r, userID)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	client, _, err := services.GetJiraClient(userID, workspaceID)
+	if err != nil {
+		http.Error(w, "Failed to get Jira client: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	cloudId, err := services.GetJiraCloudID(client)
+	if err != nil {
+		http.Error(w, "Failed to get Jira Cloud ID: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/api/integrations/jira/issues/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	issueKey := parts[0]
+	action := parts[1]
+
+	switch action {
+	case "transitions":
+		if r.Method == http.MethodGet {
+			transitions, err := services.GetAvailableTransitions(client, cloudId, issueKey)
+			if err != nil {
+				http.Error(w, "Failed to fetch transitions: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(transitions)
+			return
+		} else if r.Method == http.MethodPost {
+			var reqBody struct {
+				TransitionID string `json:"transitionId"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+				http.Error(w, "Invalid request body", http.StatusBadRequest)
+				return
+			}
+			err := services.PerformTransition(client, cloudId, issueKey, reqBody.TransitionID)
+			if err != nil {
+				http.Error(w, "Failed to perform transition: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			
+			// Optional: Trigger a background sync to reflect changes quickly
+			go services.SyncJiraSignals(userID, workspaceID)
+			
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	case "comments":
+		if r.Method == http.MethodPost {
+			var reqBody struct {
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+				http.Error(w, "Invalid request body", http.StatusBadRequest)
+				return
+			}
+			err := services.AddJiraComment(client, cloudId, issueKey, reqBody.Body)
+			if err != nil {
+				http.Error(w, "Failed to add comment: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }

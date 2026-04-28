@@ -106,6 +106,7 @@ func main() {
 	mux.Handle("/api/integrations/jira/auth", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraAuthHandler)))
 	mux.Handle("/api/integrations/jira/projects", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraProjectsHandler)))
 	mux.Handle("/api/integrations/jira/sync", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraSyncHandler)))
+	mux.Handle("/api/integrations/jira/issues/", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraIssueActionHandler)))
 	mux.Handle("/api/integrations/jira", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraDisconnectHandler)))
 	mux.Handle("/api/integrations/status", middleware.AuthMiddleware(http.HandlerFunc(handlers.IntegrationStatusHandler)))
 	mux.Handle("/api/integrations/", middleware.AuthMiddleware(http.HandlerFunc(handlers.DeleteIntegration)))

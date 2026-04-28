@@ -110,7 +110,9 @@ func ExchangeJiraCode(code string) (*oauth2.Token, error) {
 	return jiraOAuthConfig.Exchange(context.Background(), code)
 }
 
-// SaveJiraIntegration saves the Jira integration for a user
+// SaveJiraIntegration saves the Jira integration for a user.
+// It also cleans up any orphan records (e.g., NULL workspace_id) to prevent
+// duplicate integration entries that confuse the GetIntegrations query.
 func SaveJiraIntegration(userID, workspaceID int, token *oauth2.Token) error {
 	encryptedToken, err := EncryptToken(token.AccessToken)
 	if err != nil {
@@ -123,6 +125,18 @@ func SaveJiraIntegration(userID, workspaceID int, token *oauth2.Token) error {
 		if err != nil {
 			return fmt.Errorf("failed to encrypt refresh token: %w", err)
 		}
+	}
+
+	// Clean up any orphan Jira records for this user that don't match the target workspace.
+	// This handles historical records with NULL workspace_id or records from other workspaces
+	// that were created by bugs in older code.
+	if workspaceID > 0 {
+		_, _ = database.DB.Exec(
+			`DELETE FROM external_integrations
+			 WHERE user_id = ? AND provider = 'jira' AND (workspace_id IS NULL OR workspace_id = 0)
+			   AND workspace_id != ?`,
+			userID, workspaceID,
+		)
 	}
 
 	result, err := database.DB.Exec(
@@ -321,25 +335,208 @@ func FetchJiraIssues(client *http.Client, cloudId string, jql string) ([]JiraIss
 	return result.Issues, nil
 }
 
+// parseADFToText recursively extracts raw text from an Atlassian Document Format (ADF) object
+func parseADFToText(node interface{}) string {
+	if node == nil {
+		return ""
+	}
+
+	m, ok := node.(map[string]interface{})
+	if !ok {
+		// Attempt to handle slices if it's an array of nodes
+		if arr, isArr := node.([]interface{}); isArr {
+			var sb strings.Builder
+			for _, child := range arr {
+				childText := parseADFToText(child)
+				if childText != "" {
+					sb.WriteString(childText)
+				}
+			}
+			return sb.String()
+		}
+		return ""
+	}
+
+	nodeType, _ := m["type"].(string)
+	
+	var sb strings.Builder
+
+	if nodeType == "text" {
+		if text, ok := m["text"].(string); ok {
+			sb.WriteString(text)
+		}
+	}
+
+	if contentObj, exists := m["content"]; exists {
+		if contentArr, ok := contentObj.([]interface{}); ok {
+			for _, child := range contentArr {
+				childText := parseADFToText(child)
+				if childText != "" {
+					sb.WriteString(childText)
+				}
+			}
+		}
+	}
+
+	// Add newlines after block elements for readability
+	if nodeType == "paragraph" || nodeType == "heading" || nodeType == "listItem" || nodeType == "codeBlock" {
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
 // formatDescription extracts text from Jira ADF (Atlassian Document Format)
 func formatDescription(desc interface{}) string {
 	if desc == nil {
 		return ""
 	}
 	
-	bytes, err := json.Marshal(desc)
-	if err != nil {
-		return ""
-	}
+	text := strings.TrimSpace(parseADFToText(desc))
 	
-	// Complex ADF parsing could go here, but for simplicity we'll just store the raw string or attempt basic text extraction
-	// Since ADF is a complex JSON object, returning the raw string or a generic "View issue for description" might be best 
-	// if we don't implement full ADF rendering
-	str := string(bytes)
-	if len(str) > 500 {
-		return str[:500] + "..."
+	if len(text) > 500 {
+		return text[:500] + "..."
 	}
-	return str
+	if text == "" {
+		// Fallback to JSON if parsing failed completely
+		bytes, err := json.Marshal(desc)
+		if err == nil {
+			str := string(bytes)
+			if len(str) > 500 {
+				return str[:500] + "..."
+			}
+			return str
+		}
+	}
+	return text
+}
+
+// GetJiraCloudID returns the first accessible cloud ID
+func GetJiraCloudID(client *http.Client) (string, error) {
+	resources, err := FetchAtlassianResources(client)
+	if err != nil {
+		return "", err
+	}
+	if len(resources) == 0 {
+		return "", fmt.Errorf("no accessible Atlassian resources found")
+	}
+	return resources[0].ID, nil
+}
+
+// JiraTransition represents an available transition for a Jira issue
+type JiraTransition struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	To   struct {
+		Name string `json:"name"`
+	} `json:"to"`
+}
+
+// GetAvailableTransitions fetches transitions for a specific issue
+func GetAvailableTransitions(client *http.Client, cloudId string, issueKey string) ([]JiraTransition, error) {
+	apiURL := fmt.Sprintf("https://api.atlassian.com/ex/jira/%s/rest/api/3/issue/%s/transitions", cloudId, issueKey)
+	
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Jira API error: %d - %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Transitions []JiraTransition `json:"transitions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return result.Transitions, nil
+}
+
+// PerformTransition executes a status change on a specific issue
+func PerformTransition(client *http.Client, cloudId string, issueKey string, transitionID string) error {
+	apiURL := fmt.Sprintf("https://api.atlassian.com/ex/jira/%s/rest/api/3/issue/%s/transitions", cloudId, issueKey)
+	
+	requestBody, _ := json.Marshal(map[string]interface{}{
+		"transition": map[string]string{
+			"id": transitionID,
+		},
+	})
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(requestBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// 204 No Content is expected for successful transition
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Jira API error: %d - %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// AddJiraComment adds a comment to a specific issue
+func AddJiraComment(client *http.Client, cloudId string, issueKey string, commentText string) error {
+	apiURL := fmt.Sprintf("https://api.atlassian.com/ex/jira/%s/rest/api/3/issue/%s/comment", cloudId, issueKey)
+	
+	// Jira API v3 expects ADF for comments.
+	requestBody, _ := json.Marshal(map[string]interface{}{
+		"body": map[string]interface{}{
+			"version": 1,
+			"type": "doc",
+			"content": []map[string]interface{}{
+				{
+					"type": "paragraph",
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": commentText,
+						},
+					},
+				},
+			},
+		},
+	})
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(requestBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Jira API error: %d - %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
 
 func parseJiraDate(dateStr string) time.Time {

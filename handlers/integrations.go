@@ -258,6 +258,7 @@ func GetIntegrations(w http.ResponseWriter, r *http.Request) {
 		args = append(args, workspaceID)
 	}
 
+	log.Printf("[GetIntegrations] userID=%d query=%s args=%v", userID, query, args)
 	rows, err := database.DB.Query(query, args...)
 	if err != nil {
 		http.Error(w, "Failed to fetch integrations", http.StatusInternalServerError)
@@ -290,8 +291,35 @@ func GetIntegrations(w http.ResponseWriter, r *http.Request) {
 		integrations = append(integrations, integration)
 	}
 
+	// Deduplicate: if both a workspace-scoped and NULL-workspace record exist for
+	// the same provider, prefer the workspace-scoped one. This prevents duplicate
+	// integration entries from confusing the frontend's connection state logic.
+	seen := make(map[string]int) // provider -> index of best record
+	for i, integration := range integrations {
+		if prev, exists := seen[integration.Provider]; exists {
+			// Keep the one with a non-zero workspace_id
+			if integrations[prev].WorkspaceID == 0 && integration.WorkspaceID != 0 {
+				seen[integration.Provider] = i
+			}
+		} else {
+			seen[integration.Provider] = i
+		}
+	}
+	deduped := make([]models.ExternalIntegration, 0, len(seen))
+	for _, idx := range seen {
+		deduped = append(deduped, integrations[idx])
+	}
+
+	log.Printf("[GetIntegrations] returning %d integrations (from %d raw), providers: %v", len(deduped), len(integrations), func() []string {
+		ps := make([]string, len(deduped))
+		for i, d := range deduped {
+			ps[i] = fmt.Sprintf("%s(ws=%d)", d.Provider, d.WorkspaceID)
+		}
+		return ps
+	}())
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(integrations)
+	_ = json.NewEncoder(w).Encode(deduped)
 }
 
 func DeleteIntegration(w http.ResponseWriter, r *http.Request) {
@@ -903,6 +931,7 @@ func IntegrationStatusHandler(w http.ResponseWriter, r *http.Request) {
 		buildIntegrationStatus(userID, "slack", isSlackConfigured(), workspaceID),
 		buildIntegrationStatus(userID, "github", services.IsGitHubConfigured(), workspaceID),
 		buildIntegrationStatus(userID, "gmail", isGmailConfigured(), nil),
+		buildIntegrationStatus(userID, "jira", services.IsJiraConfigured(), workspaceID),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

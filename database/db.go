@@ -184,6 +184,7 @@ func InitDB() {
 	}
 
 	ensureWorkspaceOwnerMemberships()
+	cleanupOrphanIntegrations()
 }
 
 func ensureColumn(tableName, columnName, columnDefinition string) {
@@ -257,5 +258,31 @@ func ensureWorkspaceOwnerMemberships() {
 		  )
 	`); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// cleanupOrphanIntegrations removes integration records with NULL or 0 workspace_id
+// when a valid workspace-scoped record exists for the same user and provider.
+// This prevents duplicate records from confusing the GetIntegrations query which
+// includes `workspace_id IS NULL` results alongside workspace-scoped ones.
+func cleanupOrphanIntegrations() {
+	result, err := DB.Exec(`
+		DELETE FROM external_integrations
+		WHERE (workspace_id IS NULL OR workspace_id = 0)
+		  AND provider IN ('jira', 'github')
+		  AND EXISTS (
+		      SELECT 1 FROM external_integrations ei2
+		      WHERE ei2.user_id = external_integrations.user_id
+		        AND ei2.provider = external_integrations.provider
+		        AND ei2.workspace_id IS NOT NULL
+		        AND ei2.workspace_id != 0
+		  )
+	`)
+	if err != nil {
+		log.Printf("Warning: failed to clean up orphan integrations: %v", err)
+		return
+	}
+	if affected, _ := result.RowsAffected(); affected > 0 {
+		log.Printf("Cleaned up %d orphan integration records", affected)
 	}
 }
