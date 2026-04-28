@@ -3,6 +3,9 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -292,6 +295,48 @@ func TestGitHubWebhookHandlerHandlesIssueAndPullRequestEvents(t *testing.T) {
 	if prRR.Code != http.StatusOK {
 		t.Fatalf("expected 200 from pull request webhook, got %d: %s", prRR.Code, prRR.Body.String())
 	}
+}
+
+func TestGitHubWebhookHandlerVerifiesConfiguredSignature(t *testing.T) {
+	setupIntegrationsTestDB(t)
+	defer database.DB.Close()
+	t.Setenv(githubWebhookSecretEnv, "webhook-secret")
+
+	body := []byte(`{"action":"opened","issue":{"id":1,"title":"Issue"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Event", "issues")
+	req.Header.Set("X-Hub-Signature-256", "sha256="+signGitHubWebhookBody(body, "webhook-secret"))
+
+	rr := httptest.NewRecorder()
+	GitHubWebhookHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 from signed webhook, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestGitHubWebhookHandlerRejectsInvalidSignature(t *testing.T) {
+	setupIntegrationsTestDB(t)
+	defer database.DB.Close()
+	t.Setenv(githubWebhookSecretEnv, "webhook-secret")
+
+	body := []byte(`{"action":"opened","issue":{"id":1,"title":"Issue"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Event", "issues")
+	req.Header.Set("X-Hub-Signature-256", "sha256="+signGitHubWebhookBody(body, "wrong-secret"))
+
+	rr := httptest.NewRecorder()
+	GitHubWebhookHandler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 from invalid webhook signature, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func signGitHubWebhookBody(body []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func integrationRequestWithBody(method, target, email string, body []byte) *http.Request {

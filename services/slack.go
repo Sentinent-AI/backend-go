@@ -1,6 +1,9 @@
 package services
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -362,34 +365,61 @@ func IsSlackAPIError(err error, code string) bool {
 
 // SlackWebhookEvent represents an incoming webhook event from Slack
 type SlackWebhookEvent struct {
-	Token       string `json:"token"`
-	TeamID      string `json:"team_id"`
-	APIAppID    string `json:"api_app_id"`
+	Token       string          `json:"token"`
+	TeamID      string          `json:"team_id"`
+	APIAppID    string          `json:"api_app_id"`
 	Event       json.RawMessage `json:"event"`
-	Type        string `json:"type"`
-	EventID     string `json:"event_id"`
-	EventTime   int64  `json:"event_time"`
-	AuthedUsers []string `json:"authed_users"`
-	Challenge   string `json:"challenge"`
+	Type        string          `json:"type"`
+	EventID     string          `json:"event_id"`
+	EventTime   int64           `json:"event_time"`
+	AuthedUsers []string        `json:"authed_users"`
+	Challenge   string          `json:"challenge"`
 }
 
 // SlackMessageEvent represents a message event from Slack
 type SlackMessageEvent struct {
-	Type    string `json:"type"`
-	Channel string `json:"channel"`
-	User    string `json:"user"`
-	Text    string `json:"text"`
-	TS      string `json:"ts"`
+	Type     string `json:"type"`
+	Channel  string `json:"channel"`
+	User     string `json:"user"`
+	Text     string `json:"text"`
+	TS       string `json:"ts"`
 	ThreadTS string `json:"thread_ts"`
 }
 
 // ValidateWebhookRequest validates that a webhook request is from Slack
 func (c *SlackClient) ValidateWebhookRequest(body []byte, signature, timestamp, signingSecret string) error {
-	// In production, implement Slack's request signature verification
-	// https://api.slack.com/authentication/verifying-requests-from-slack
-	// For now, this is a placeholder
+	signingSecret = strings.TrimSpace(signingSecret)
 	if signingSecret == "" {
 		return errors.New("signing secret not configured")
 	}
+
+	signature = strings.TrimSpace(signature)
+	if !strings.HasPrefix(signature, "v0=") {
+		return errors.New("invalid Slack signature format")
+	}
+
+	requestTime, err := strconv.ParseInt(strings.TrimSpace(timestamp), 10, 64)
+	if err != nil {
+		return errors.New("invalid Slack timestamp")
+	}
+	if age := time.Since(time.Unix(requestTime, 0)); age > 5*time.Minute || age < -5*time.Minute {
+		return errors.New("stale Slack timestamp")
+	}
+
+	actual, err := hex.DecodeString(strings.TrimPrefix(signature, "v0="))
+	if err != nil {
+		return errors.New("invalid Slack signature")
+	}
+
+	baseString := fmt.Sprintf("v0:%s:%s", timestamp, string(body))
+	mac := hmac.New(sha256.New, []byte(signingSecret))
+	if _, err := mac.Write([]byte(baseString)); err != nil {
+		return err
+	}
+
+	if !hmac.Equal(actual, mac.Sum(nil)) {
+		return errors.New("Slack signature mismatch")
+	}
+
 	return nil
 }
