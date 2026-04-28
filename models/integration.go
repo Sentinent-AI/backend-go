@@ -16,8 +16,8 @@ type ExternalIntegration struct {
 }
 
 type IntegrationStatus struct {
-	Provider   string    `json:"provider"`
-	Configured bool      `json:"configured"`
-	Connected  bool      `json:"connected"`
-	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	Provider  string    `json:"provider"`
+	Configured bool     `json:"configured"`
+	Connected bool      `json:"connected"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }

@@ -362,24 +362,24 @@ func IsSlackAPIError(err error, code string) bool {
 
 // SlackWebhookEvent represents an incoming webhook event from Slack
 type SlackWebhookEvent struct {
-	Token       string          `json:"token"`
-	TeamID      string          `json:"team_id"`
-	APIAppID    string          `json:"api_app_id"`
+	Token       string `json:"token"`
+	TeamID      string `json:"team_id"`
+	APIAppID    string `json:"api_app_id"`
 	Event       json.RawMessage `json:"event"`
-	Type        string          `json:"type"`
-	EventID     string          `json:"event_id"`
-	EventTime   int64           `json:"event_time"`
-	AuthedUsers []string        `json:"authed_users"`
-	Challenge   string          `json:"challenge"`
+	Type        string `json:"type"`
+	EventID     string `json:"event_id"`
+	EventTime   int64  `json:"event_time"`
+	AuthedUsers []string `json:"authed_users"`
+	Challenge   string `json:"challenge"`
 }
 
 // SlackMessageEvent represents a message event from Slack
 type SlackMessageEvent struct {
-	Type     string `json:"type"`
-	Channel  string `json:"channel"`
-	User     string `json:"user"`
-	Text     string `json:"text"`
-	TS       string `json:"ts"`
+	Type    string `json:"type"`
+	Channel string `json:"channel"`
+	User    string `json:"user"`
+	Text    string `json:"text"`
+	TS      string `json:"ts"`
 	ThreadTS string `json:"thread_ts"`
 }
 
