@@ -217,6 +217,53 @@ func TestSignupInvalidEmail(t *testing.T) {
 	}
 }
 
+func TestSignupRejectsUnsupportedMethod(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodGet, "/signup", nil)
+	rr := httptest.NewRecorder()
+
+	Signup(rr, req)
+
+	if status := rr.Code; status != http.StatusMethodNotAllowed {
+		t.Fatalf("handler returned wrong status code: got %v want %v", status, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestSignupRejectsShortPassword(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewBufferString(`{"email":"test@example.com","password":"short"}`))
+	rr := httptest.NewRecorder()
+
+	Signup(rr, req)
+
+	if status := rr.Code; status != http.StatusBadRequest {
+		t.Fatalf("handler returned wrong status code: got %v want %v", status, http.StatusBadRequest)
+	}
+}
+
+func TestSignupTrimsEmailBeforeValidation(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewBufferString(`{"email":" test@example.com ","password":"password123"}`))
+	rr := httptest.NewRecorder()
+
+	Signup(rr, req)
+
+	if status := rr.Code; status != http.StatusCreated {
+		t.Fatalf("handler returned wrong status code: got %v want %v", status, http.StatusCreated)
+	}
+
+	var count int
+	if err := database.DB.QueryRow("SELECT count(*) FROM users WHERE email = ?", "test@example.com").Scan(&count); err != nil {
+		t.Fatalf("error querying db: %v", err)
+	}
+	if count != 1 {
+		t.Fatal("trimmed email was not stored")
+	}
+}
+
 func TestSigninInvalidEmail(t *testing.T) {
 	setupTestDB()
 	defer database.DB.Close()
@@ -235,6 +282,34 @@ func TestSigninInvalidEmail(t *testing.T) {
 	if status := rr.Code; status != http.StatusBadRequest {
 		t.Errorf("handler returned wrong status code: got %v want %v",
 			status, http.StatusBadRequest)
+	}
+}
+
+func TestSigninRejectsUnsupportedMethod(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodGet, "/signin", nil)
+	rr := httptest.NewRecorder()
+
+	Signin(rr, req)
+
+	if status := rr.Code; status != http.StatusMethodNotAllowed {
+		t.Fatalf("handler returned wrong status code: got %v want %v", status, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestSigninTrimsEmailBeforeLookup(t *testing.T) {
+	setupTestDB()
+	defer database.DB.Close()
+	t.Setenv("APP_ENV", "development")
+
+	Signup(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/signup", bytes.NewBufferString(`{"email":"test@example.com","password":"password123"}`)))
+
+	req := httptest.NewRequest(http.MethodPost, "/signin", bytes.NewBufferString(`{"email":" test@example.com ","password":"password123"}`))
+	rr := httptest.NewRecorder()
+
+	Signin(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Fatalf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
 	}
 }
 
