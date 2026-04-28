@@ -2,10 +2,15 @@ package handlers
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -48,7 +53,10 @@ const (
 	githubOAuthStateTTL        = 10 * time.Minute
 	gmailOAuthStateTTL         = 10 * time.Minute
 	slackOAuthStateTTL         = 10 * time.Minute
+	githubWebhookSecretEnv     = "GITHUB_WEBHOOK_SECRET"
 )
+
+var errGitHubWebhookSecretMissing = errors.New("github webhook secret is not configured")
 
 type githubOAuthStateClaims struct {
 	Email       string `json:"email"`
@@ -957,8 +965,23 @@ func GitHubWebhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	if err := validateGitHubWebhookSignature(r, body); err != nil {
+		if errors.Is(err, errGitHubWebhookSecretMissing) {
+			http.Error(w, "GitHub webhook secret not configured", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, "Invalid webhook signature", http.StatusUnauthorized)
+		return
+	}
+
 	var payload map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		http.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
@@ -971,6 +994,36 @@ func GitHubWebhookHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func validateGitHubWebhookSignature(r *http.Request, body []byte) error {
+	secret := strings.TrimSpace(os.Getenv(githubWebhookSecretEnv))
+	if secret == "" {
+		if isProductionEnv() {
+			return errGitHubWebhookSecretMissing
+		}
+		return nil
+	}
+
+	signature := strings.TrimSpace(r.Header.Get("X-Hub-Signature-256"))
+	if !strings.HasPrefix(signature, "sha256=") {
+		return errors.New("missing sha256 signature")
+	}
+
+	actual, err := hex.DecodeString(strings.TrimPrefix(signature, "sha256="))
+	if err != nil {
+		return err
+	}
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	if _, err := mac.Write(body); err != nil {
+		return err
+	}
+
+	if !hmac.Equal(actual, mac.Sum(nil)) {
+		return errors.New("signature mismatch")
+	}
+	return nil
 }
 
 func handleIssuesWebhook(payload map[string]interface{}) {
