@@ -33,6 +33,24 @@ func IsGitHubConfigured() bool {
 	return githubOAuthConfig != nil && len(tokenEncryptionKey) > 0
 }
 
+func initTokenEncryptionKey() error {
+	encryptionKey := strings.TrimSpace(os.Getenv("TOKEN_ENCRYPTION_KEY"))
+	if encryptionKey == "" {
+		return fmt.Errorf("TOKEN_ENCRYPTION_KEY must be set")
+	}
+
+	tokenEncryptionKey = []byte(encryptionKey)
+	if len(tokenEncryptionKey) < 32 {
+		paddedKey := make([]byte, 32)
+		copy(paddedKey, tokenEncryptionKey)
+		tokenEncryptionKey = paddedKey
+	} else if len(tokenEncryptionKey) > 32 {
+		tokenEncryptionKey = tokenEncryptionKey[:32]
+	}
+
+	return nil
+}
+
 // GitHubIssue represents a GitHub issue or PR
 // We use a single struct since the API response is similar
 type GitHubIssue struct {
@@ -59,27 +77,13 @@ type GitHubIssue struct {
 func InitGitHubService() error {
 	clientID := strings.TrimSpace(os.Getenv("GITHUB_CLIENT_ID"))
 	clientSecret := strings.TrimSpace(os.Getenv("GITHUB_CLIENT_SECRET"))
-	encryptionKey := strings.TrimSpace(os.Getenv("TOKEN_ENCRYPTION_KEY"))
-
-	if encryptionKey != "" {
-		// Ensure key is 32 bytes for AES-256
-		tokenEncryptionKey = []byte(encryptionKey)
-		if len(tokenEncryptionKey) < 32 {
-			// Pad key to 32 bytes
-			paddedKey := make([]byte, 32)
-			copy(paddedKey, tokenEncryptionKey)
-			tokenEncryptionKey = paddedKey
-		} else if len(tokenEncryptionKey) > 32 {
-			tokenEncryptionKey = tokenEncryptionKey[:32]
-		}
-	}
 
 	if clientID == "" || clientSecret == "" {
 		return fmt.Errorf("GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET must be set")
 	}
 
-	if encryptionKey == "" {
-		return fmt.Errorf("TOKEN_ENCRYPTION_KEY must be set")
+	if err := initTokenEncryptionKey(); err != nil {
+		return err
 	}
 
 	githubOAuthConfig = &oauth2.Config{
@@ -531,17 +535,37 @@ func GetUserSignals(userID int, filter *models.SignalFilter) ([]models.Signal, e
 		if receivedAt.Valid {
 			signal.ReceivedAt = receivedAt.Time
 		}
-		if metadataJSON.Valid && metadataJSON.String != "" {
-			var metadata models.GitHubMetadata
-			if err := json.Unmarshal([]byte(metadataJSON.String), &metadata); err == nil {
-				signal.SourceMetadata = &metadata
-			}
-		}
+		signal.SourceMetadata = parseSignalMetadata(signal.SourceType, metadataJSON.String)
 
 		signals = append(signals, signal)
 	}
 
 	return signals, rows.Err()
+}
+
+func parseSignalMetadata(sourceType string, metadataJSON string) interface{} {
+	if metadataJSON == "" {
+		return nil
+	}
+
+	switch sourceType {
+	case models.SourceTypeGitHub:
+		var metadata models.GitHubMetadata
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err == nil {
+			return &metadata
+		}
+	case models.SourceTypeJira:
+		var metadata models.JiraMetadata
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err == nil {
+			return &metadata
+		}
+	}
+
+	var metadata map[string]interface{}
+	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err == nil {
+		return metadata
+	}
+	return nil
 }
 
 // ListAccessibleRepos lists repositories accessible to the user

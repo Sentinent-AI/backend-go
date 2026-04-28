@@ -108,16 +108,22 @@ func (s *SyncService) syncAllIntegrations() {
 	}
 
 	for _, record := range records {
-		// Decrypt token
-		accessToken, err := s.tokenEncryptor.Decrypt(record.encryptedToken)
-		if err != nil {
-			log.Printf("Failed to decrypt token for integration %d: %v", record.integration.ID, err)
-			continue
-		}
-
 		switch record.integration.Provider {
 		case "slack":
+			accessToken, err := s.tokenEncryptor.Decrypt(record.encryptedToken)
+			if err != nil {
+				log.Printf("Failed to decrypt token for integration %d: %v", record.integration.ID, err)
+				continue
+			}
 			s.syncSlackIntegration(&record.integration, accessToken)
+		case "github":
+			if err := SyncGitHubSignals(record.integration.UserID, record.integration.WorkspaceID); err != nil {
+				log.Printf("Failed to sync GitHub integration %d: %v", record.integration.ID, err)
+			}
+		case "jira":
+			if err := SyncJiraSignals(record.integration.UserID, record.integration.WorkspaceID); err != nil {
+				log.Printf("Failed to sync Jira integration %d: %v", record.integration.ID, err)
+			}
 		default:
 			log.Printf("Unknown provider: %s", record.integration.Provider)
 		}
