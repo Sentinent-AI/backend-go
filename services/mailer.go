@@ -58,7 +58,7 @@ func PasswordResetEmailDeliveryConfigured() bool {
 // TCP connection and the entire SMTP conversation. This prevents the caller
 // from blocking indefinitely when a firewall silently drops the connection.
 func sendSMTP(config SMTPConfig, message string, recipients []string) error {
-	addr := fmt.Sprintf("%s:%d", config.Host, config.Port)
+	addr := net.JoinHostPort(config.Host, strconv.Itoa(config.Port))
 
 	// Dial with explicit timeout so we fail fast instead of waiting minutes.
 	conn, err := net.DialTimeout("tcp", addr, smtpTimeout)
