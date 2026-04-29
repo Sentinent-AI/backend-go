@@ -139,6 +139,8 @@ func main() {
 			middleware.AuthMiddleware(http.HandlerFunc(handlers.CancelInvitation)).ServeHTTP(w, r)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/accept"):
 			middleware.AuthMiddleware(http.HandlerFunc(handlers.AcceptInvitation)).ServeHTTP(w, r)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/resend"):
+			middleware.AuthMiddleware(http.HandlerFunc(handlers.ResendInvitation)).ServeHTTP(w, r)
 		default:
 			http.Error(w, "Not found", http.StatusNotFound)
 		}
