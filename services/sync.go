@@ -185,6 +185,10 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 		}
 	}
 
+	// Cache for user names to avoid redundant API calls across channels
+	userCache := make(map[string]string)
+	var maxTS float64
+
 	// Fetch messages from each channel
 	for _, channelID := range channels {
 		var oldest string
@@ -206,13 +210,24 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 			continue
 		}
 
-		// Cache for user names to avoid redundant API calls
-		userCache := make(map[string]string)
+		// Use a transaction for all messages in this channel for speed
+		tx, err := database.DB.Begin()
+		if err != nil {
+			log.Printf("Failed to start transaction for channel %s: %v", channelID, err)
+			continue
+		}
 
 		// Process and store messages
 		for _, msg := range messages {
 			if msg.Type != "message" || msg.User == "" {
 				continue
+			}
+
+			// Track latest message timestamp across all channels
+			if ts, err := strconv.ParseFloat(msg.TS, 64); err == nil {
+				if ts > maxTS {
+					maxTS = ts
+				}
 			}
 
 			sourceID := buildSlackSignalSourceID(channelID, msg.TS)
@@ -222,6 +237,7 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 			if cachedName, ok := userCache[msg.User]; ok {
 				authorName = cachedName
 			} else {
+				// Only fetch if not already in cache
 				userResp, _, err := s.slackClient.GetUserInfo(accessToken, msg.User)
 				if err == nil && userResp != nil {
 					if userResp.User.RealName != "" {
@@ -247,7 +263,7 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 			}
 
 			// Use UPSERT to handle duplicates and updates
-			_, err = database.DB.Exec(
+			_, err = tx.Exec(
 				`INSERT INTO signals 
 				 (user_id, workspace_id, source_type, source_id, external_id, title, content, body, author, status, source_metadata, received_at, updated_at)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -263,8 +279,12 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 				models.SignalStatusUnread, string(metadataJSON), time.Unix(msg.Timestamp, 0),
 			)
 			if err != nil {
-				log.Printf("Failed to upsert Slack signal: %v", err)
+				log.Printf("Failed to prepare upsert for Slack signal: %v", err)
 			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			log.Printf("Failed to commit transaction for channel %s: %v", channelID, err)
 		}
 
 		// Respect rate limits only when Slack actually returned limit metadata.
@@ -273,15 +293,16 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 		}
 	}
 
-	// Update last sync timestamp
-	metadata["last_sync"] = float64(time.Now().Unix())
-	metadataJSON, _ := json.Marshal(metadata)
-	_, err := database.DB.Exec(
-		"UPDATE external_integrations SET metadata = ?, updated_at = ? WHERE id = ?",
-		string(metadataJSON), time.Now(), integration.ID,
-	)
-	if err != nil {
-		log.Printf("Failed to update last sync timestamp: %v", err)
+	if maxTS > 0 {
+		metadata["last_sync"] = maxTS
+		newMetadata, _ := json.Marshal(metadata)
+		_, err := database.DB.Exec(
+			"UPDATE external_integrations SET metadata = ?, updated_at = ? WHERE id = ?",
+			string(newMetadata), time.Now(), integration.ID,
+		)
+		if err != nil {
+			log.Printf("Failed to update last sync timestamp: %v", err)
+		}
 	}
 
 	log.Printf("Synced Slack integration %d, channels: %d", integration.ID, len(channels))

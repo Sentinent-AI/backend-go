@@ -1,16 +1,21 @@
 package services
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/mail"
 	"net/smtp"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var ErrSMTPNotConfigured = errors.New("smtp configuration is incomplete")
+
+const smtpTimeout = 15 * time.Second
 
 type SMTPConfig struct {
 	Host      string
@@ -49,6 +54,97 @@ func PasswordResetEmailDeliveryConfigured() bool {
 	return err == nil
 }
 
+// sendSMTP dials the SMTP server with a hard 15-second timeout for both the
+// TCP connection and the entire SMTP conversation. This prevents the caller
+// from blocking indefinitely when a firewall silently drops the connection.
+func sendSMTP(config SMTPConfig, message string, recipients []string) error {
+	addr := net.JoinHostPort(config.Host, strconv.Itoa(config.Port))
+
+	// Dial with explicit timeout so we fail fast instead of waiting minutes.
+	conn, err := net.DialTimeout("tcp", addr, smtpTimeout)
+	if err != nil {
+		return fmt.Errorf("smtp dial %s: %w", addr, err)
+	}
+	// Apply a deadline to every subsequent read/write on this connection.
+	conn.SetDeadline(time.Now().Add(smtpTimeout)) //nolint:errcheck
+	defer conn.Close()
+
+	c, err := smtp.NewClient(conn, config.Host)
+	if err != nil {
+		return fmt.Errorf("smtp client: %w", err)
+	}
+	defer c.Close()
+
+	// Upgrade to TLS via STARTTLS if the server advertises it (port 587).
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		if err = c.StartTLS(&tls.Config{ServerName: config.Host}); err != nil {
+			return fmt.Errorf("smtp starttls: %w", err)
+		}
+	}
+
+	// Authenticate when credentials are provided.
+	if config.Username != "" || config.Password != "" {
+		auth := smtp.PlainAuth("", config.Username, config.Password, config.Host)
+		if err = c.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+
+	if err = c.Mail(config.FromEmail); err != nil {
+		return fmt.Errorf("smtp MAIL FROM: %w", err)
+	}
+	for _, to := range recipients {
+		if err = c.Rcpt(to); err != nil {
+			return fmt.Errorf("smtp RCPT TO <%s>: %w", to, err)
+		}
+	}
+
+	wc, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("smtp DATA: %w", err)
+	}
+	if _, err = wc.Write([]byte(message)); err != nil {
+		wc.Close()
+		return fmt.Errorf("smtp write body: %w", err)
+	}
+	if err = wc.Close(); err != nil {
+		return fmt.Errorf("smtp close data writer: %w", err)
+	}
+	return c.Quit()
+}
+
+// buildMessage creates the raw SMTP message bytes from config and body.
+func buildMessage(config SMTPConfig, toEmail, subject, body string) string {
+	fromHeader := config.FromEmail
+	if config.FromName != "" {
+		fromHeader = (&mail.Address{Name: config.FromName, Address: config.FromEmail}).String()
+	}
+	return strings.Join([]string{
+		"From: " + fromHeader,
+		"To: " + toEmail,
+		"Subject: " + subject,
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"",
+		body,
+	}, "\r\n")
+}
+
+func SendInvitationEmail(toEmail, workspaceName, invitedByEmail, acceptURL string) error {
+	config, err := LoadSMTPConfigFromEnv()
+	if err != nil {
+		return err
+	}
+
+	subject := fmt.Sprintf("You've been invited to join %s on Sentinent", workspaceName)
+	body := fmt.Sprintf(
+		"Hello,\r\n\r\n%s has invited you to join the workspace \"%s\" on Sentinent.\r\n\r\nAccept your invitation here:\r\n%s\r\n\r\nThis invitation expires in 7 days. If you weren't expecting this, you can safely ignore this email.\r\n",
+		invitedByEmail, workspaceName, acceptURL,
+	)
+
+	return sendSMTP(config, buildMessage(config, toEmail, subject, body), []string{toEmail})
+}
+
 func SendPasswordResetEmail(toEmail, resetURL string) error {
 	config, err := LoadSMTPConfigFromEnv()
 	if err != nil {
@@ -61,31 +157,5 @@ func SendPasswordResetEmail(toEmail, resetURL string) error {
 		resetURL,
 	)
 
-	fromHeader := config.FromEmail
-	if config.FromName != "" {
-		fromHeader = (&mail.Address{Name: config.FromName, Address: config.FromEmail}).String()
-	}
-
-	message := strings.Join([]string{
-		"From: " + fromHeader,
-		"To: " + toEmail,
-		"Subject: " + subject,
-		"MIME-Version: 1.0",
-		"Content-Type: text/plain; charset=UTF-8",
-		"",
-		body,
-	}, "\r\n")
-
-	var auth smtp.Auth
-	if config.Username != "" || config.Password != "" {
-		auth = smtp.PlainAuth("", config.Username, config.Password, config.Host)
-	}
-
-	return smtp.SendMail(
-		fmt.Sprintf("%s:%d", config.Host, config.Port),
-		auth,
-		config.FromEmail,
-		[]string{toEmail},
-		[]byte(message),
-	)
+	return sendSMTP(config, buildMessage(config, toEmail, subject, body), []string{toEmail})
 }
