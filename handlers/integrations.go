@@ -443,6 +443,231 @@ func GetSlackChannels(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"channels": channels})
 }
 
+func SlackWebhookHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Invalid body", http.StatusBadRequest)
+		return
+	}
+
+	// Verify signature if secret is configured
+	signingSecret := os.Getenv("SLACK_SIGNING_SECRET")
+	if signingSecret != "" {
+		signature := r.Header.Get("X-Slack-Signature")
+		timestamp := r.Header.Get("X-Slack-Request-Timestamp")
+		if err := slackClient.ValidateWebhookRequest(body, signature, timestamp, signingSecret); err != nil {
+			log.Printf("Slack webhook signature validation failed: %v", err)
+			http.Error(w, "Invalid signature", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	var event services.SlackWebhookEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Handle URL verification challenge
+	if event.Type == "url_verification" {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(event.Challenge))
+		return
+	}
+
+	// Handle event callbacks
+	if event.Type == "event_callback" {
+		var innerEvent services.SlackMessageEvent
+		if err := json.Unmarshal(event.Event, &innerEvent); err == nil {
+			if innerEvent.Type == "message" && innerEvent.User != "" {
+				go handleSlackMessageEvent(event.TeamID, innerEvent)
+			}
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleSlackMessageEvent(teamID string, event services.SlackMessageEvent) {
+	// Find integrations for this team
+	rows, err := database.DB.Query(
+		"SELECT user_id, workspace_id, metadata FROM external_integrations WHERE provider = 'slack'",
+	)
+	if err != nil {
+		log.Printf("Failed to query integrations for Slack webhook: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var userID, workspaceID int
+		var metadataStr string
+		if err := rows.Scan(&userID, &workspaceID, &metadataStr); err != nil {
+			continue
+		}
+
+		var metadata map[string]interface{}
+		json.Unmarshal([]byte(metadataStr), &metadata)
+
+		if metadata["team_id"] == teamID {
+			// Check if channel is selected
+			selectedChannels, ok := metadata["selected_channels"].([]interface{})
+			isChannelSelected := false
+			if !ok || len(selectedChannels) == 0 {
+				isChannelSelected = true // Default to all if none selected (as per sync.go)
+			} else {
+				for _, ch := range selectedChannels {
+					if chStr, ok := ch.(string); ok && chStr == event.Channel {
+						isChannelSelected = true
+						break
+					}
+				}
+			}
+
+			if isChannelSelected {
+				msg := services.SlackMessage{
+					User: event.User,
+					Text: event.Text,
+					TS:   event.TS,
+				}
+				// Parse timestamp
+				parts := strings.Split(event.TS, ".")
+				if len(parts) > 0 {
+					sec, _ := strconv.ParseInt(parts[0], 10, 64)
+					msg.Timestamp = sec
+				}
+
+				if err := services.SaveSlackSignal(database.DB, userID, workspaceID, msg, event.Channel, event.User); err != nil {
+					log.Printf("Failed to save Slack webhook signal: %v", err)
+				}
+			}
+		}
+	}
+}
+
+func SlackReplyHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	workspaceID, statusCode, err := getAuthorizedWorkspaceID(r, userID)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	var req struct {
+		ChannelID string `json:"channel_id"`
+		ThreadTS  string `json:"thread_ts"`
+		Text      string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Fetch token
+	var encryptedToken string
+	err = database.DB.QueryRow(
+		`SELECT access_token FROM external_integrations 
+		 WHERE user_id = ? AND workspace_id = ? AND provider = 'slack'`,
+		userID, workspaceID,
+	).Scan(&encryptedToken)
+	if err != nil {
+		http.Error(w, "Integration not found", http.StatusNotFound)
+		return
+	}
+
+	accessToken, err := tokenEncryptor.Decrypt(encryptedToken)
+	if err != nil {
+		http.Error(w, "Failed to decrypt token", http.StatusInternalServerError)
+		return
+	}
+
+	rateLimit, err := slackClient.PostMessage(accessToken, req.ChannelID, req.Text, req.ThreadTS)
+	if err != nil {
+		if rateLimit != nil && rateLimit.IsRateLimited() {
+			http.Error(w, "Rate limited", http.StatusTooManyRequests)
+			return
+		}
+		http.Error(w, "Failed to post message: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func SlackDisconnectHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	workspaceID, statusCode, err := getAuthorizedWorkspaceID(r, userID)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	if _, err := database.DB.Exec(
+		"DELETE FROM external_integrations WHERE user_id = ? AND workspace_id = ? AND provider = 'slack'",
+		userID, workspaceID,
+	); err != nil {
+		http.Error(w, "Failed to disconnect Slack", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "disconnected"})
+}
+
+func SlackSyncHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, err := getUserIDFromContext(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	workspaceID, statusCode, err := getAuthorizedWorkspaceID(r, userID)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+
+	go func() {
+		if err := services.SyncSlackSignals(userID, workspaceID); err != nil {
+			log.Printf("Manual Slack sync error: %v", err)
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "sync_started"})
+}
+
 func GmailAuthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

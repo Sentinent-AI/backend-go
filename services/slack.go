@@ -3,6 +3,7 @@ package services
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -319,6 +320,50 @@ func (c *SlackClient) MarkMessageAsRead(accessToken, channelID, timestamp string
 	return rateLimit, nil
 }
 
+// PostMessage posts a message to a channel, optionally in a thread
+func (c *SlackClient) PostMessage(accessToken, channelID, text, threadTS string) (*RateLimitInfo, error) {
+	data := url.Values{}
+	data.Set("channel", channelID)
+	data.Set("text", text)
+	if threadTS != "" {
+		data.Set("thread_ts", threadTS)
+	}
+
+	req, err := http.NewRequest("POST", c.BaseURL+"/chat.postMessage", strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	rateLimit := extractRateLimit(resp)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return rateLimit, err
+	}
+
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return rateLimit, err
+	}
+
+	if !result.OK {
+		return rateLimit, &SlackAPIError{Code: result.Error}
+	}
+
+	return rateLimit, nil
+}
+
 // extractRateLimit extracts rate limit headers from the response
 func extractRateLimit(resp *http.Response) *RateLimitInfo {
 	info := &RateLimitInfo{}
@@ -422,4 +467,46 @@ func (c *SlackClient) ValidateWebhookRequest(body []byte, signature, timestamp, 
 	}
 
 	return nil
+}
+
+// SaveSlackSignal saves a Slack message as a signal in the database
+func SaveSlackSignal(db *sql.DB, userID, workspaceID int, msg SlackMessage, channelID string, authorName string) error {
+	sourceID := channelID + ":" + msg.TS
+
+	// Store metadata
+	msgMetadata := map[string]interface{}{
+		"channel_id": channelID,
+		"ts":         msg.TS,
+		"user_id":    msg.User,
+	}
+	metadataJSON, _ := json.Marshal(msgMetadata)
+
+	title := truncateString(msg.Text, 100)
+	if title == "" {
+		title = "Slack Message"
+	}
+
+	// Use UPSERT to handle duplicates and updates
+	_, err := db.Exec(
+		`INSERT INTO signals 
+		 (user_id, workspace_id, source_type, source_id, external_id, title, content, body, author, status, source_metadata, received_at, updated_at)
+		 VALUES (?, ?, 'slack', ?, ?, ?, ?, ?, ?, 'unread', ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(user_id, source_type, source_id) DO UPDATE SET
+			title = excluded.title,
+			content = excluded.content,
+			body = excluded.body,
+			author = excluded.author,
+			source_metadata = excluded.source_metadata,
+			updated_at = CURRENT_TIMESTAMP`,
+		userID, workspaceID, sourceID, msg.TS, title, msg.Text, msg.Text, authorName,
+		string(metadataJSON), time.Unix(msg.Timestamp, 0),
+	)
+	return err
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
