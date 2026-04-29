@@ -99,6 +99,7 @@ func main() {
 	mux.Handle("/api/integrations", middleware.AuthMiddleware(http.HandlerFunc(handlers.GetIntegrations)))
 	mux.Handle("/api/integrations/slack/auth", middleware.AuthMiddleware(http.HandlerFunc(handlers.SlackAuth)))
 	mux.Handle("/api/integrations/slack/channels", middleware.AuthMiddleware(http.HandlerFunc(handlers.GetSlackChannels)))
+	mux.Handle("/api/integrations/slack/sync", middleware.AuthMiddleware(http.HandlerFunc(handlers.SlackSyncHandler)))
 	mux.Handle("/api/integrations/github/auth", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubAuthHandler)))
 	mux.Handle("/api/integrations/github/repos", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubReposHandler)))
 	mux.Handle("/api/integrations/github/sync", middleware.AuthMiddleware(http.HandlerFunc(handlers.GitHubSyncHandler)))
@@ -121,6 +122,8 @@ func main() {
 	mux.Handle("/api/integrations/jira/sync", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraSyncHandler)))
 	mux.Handle("/api/integrations/jira/issues/", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraIssueActionHandler)))
 	mux.Handle("/api/integrations/jira", middleware.AuthMiddleware(http.HandlerFunc(handlers.JiraDisconnectHandler)))
+	mux.Handle("/api/integrations/slack/reply", middleware.AuthMiddleware(http.HandlerFunc(handlers.SlackReplyHandler)))
+	mux.Handle("/api/integrations/slack", middleware.AuthMiddleware(http.HandlerFunc(handlers.SlackDisconnectHandler)))
 	mux.Handle("/api/integrations/status", middleware.AuthMiddleware(http.HandlerFunc(handlers.IntegrationStatusHandler)))
 	mux.Handle("/api/integrations/", middleware.AuthMiddleware(http.HandlerFunc(handlers.DeleteIntegration)))
 
@@ -156,6 +159,7 @@ func main() {
 
 	// Webhook routes (public, but should verify signature in production)
 	mux.HandleFunc("/api/webhooks/github", handlers.GitHubWebhookHandler)
+	mux.HandleFunc("/api/webhooks/slack", handlers.SlackWebhookHandler)
 
 	// Apply CORS and logging middleware
 	handler := loggingMiddleware(middleware.CorsMiddleware(mux))

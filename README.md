@@ -33,7 +33,14 @@ Slack integration:
 
 - `SLACK_CLIENT_ID`: Slack OAuth app client ID.
 - `SLACK_CLIENT_SECRET`: Slack OAuth app client secret.
+- `SLACK_SIGNING_SECRET`: Slack App signing secret used for verifying webhook signatures.
 - `SLACK_REDIRECT_URI`: Optional override for the Slack OAuth callback URL. Defaults to the current request host plus `/api/integrations/slack/callback`.
+
+### Slack Webhooks
+For real-time message ingestion, configure "Event Subscriptions" in your Slack App settings to point to:
+`https://<your-public-domain>/api/webhooks/slack`
+
+Ensure you have subscribed to the `message.channels` bot user event.
 
 GitHub integration:
 

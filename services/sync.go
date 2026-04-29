@@ -202,6 +202,9 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 			continue
 		}
 
+		// Cache for user names to avoid redundant API calls
+		userCache := make(map[string]string)
+
 		// Process and store messages
 		for _, msg := range messages {
 			if msg.Type != "message" || msg.User == "" {
@@ -212,38 +215,51 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 
 			// Get user info for author name
 			authorName := msg.User
-			userResp, _, err := s.slackClient.GetUserInfo(accessToken, msg.User)
-			if err == nil && userResp != nil {
-				if userResp.User.RealName != "" {
-					authorName = userResp.User.RealName
-				} else if userResp.User.Name != "" {
-					authorName = userResp.User.Name
+			if cachedName, ok := userCache[msg.User]; ok {
+				authorName = cachedName
+			} else {
+				userResp, _, err := s.slackClient.GetUserInfo(accessToken, msg.User)
+				if err == nil && userResp != nil {
+					if userResp.User.RealName != "" {
+						authorName = userResp.User.RealName
+					} else if userResp.User.Name != "" {
+						authorName = userResp.User.Name
+					}
+					userCache[msg.User] = authorName
 				}
 			}
 
-			// Check if signal already exists
-			var existingID int
-			err = database.DB.QueryRow(
-				`SELECT id FROM signals
-				 WHERE user_id = ? AND source_type = ?
-				 AND (source_id = ? OR external_id = ?)`,
-				integration.UserID, models.SourceTypeSlack, sourceID, msg.TS,
-			).Scan(&existingID)
+			// Store metadata
+			msgMetadata := map[string]interface{}{
+				"channel_id": channelID,
+				"ts":         msg.TS,
+				"user_id":    msg.User,
+			}
+			metadataJSON, _ := json.Marshal(msgMetadata)
 
-			if err == sql.ErrNoRows {
-				// Insert new signal
-				_, err = database.DB.Exec(
-					`INSERT INTO signals (user_id, workspace_id, source_type, source_id, external_id, title, content, author, status, received_at)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					integration.UserID, integration.WorkspaceID, models.SourceTypeSlack,
-					sourceID, msg.TS, truncate(msg.Text, 100), msg.Text, authorName,
-					models.SignalStatusUnread, time.Unix(msg.Timestamp, 0),
-				)
-				if err != nil {
-					log.Printf("Failed to insert signal: %v", err)
-				}
-			} else if err != nil {
-				log.Printf("Failed to check existing signal: %v", err)
+			title := truncate(msg.Text, 100)
+			if title == "" {
+				title = "Slack Message"
+			}
+
+			// Use UPSERT to handle duplicates and updates
+			_, err = database.DB.Exec(
+				`INSERT INTO signals 
+				 (user_id, workspace_id, source_type, source_id, external_id, title, content, body, author, status, source_metadata, received_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				 ON CONFLICT(user_id, source_type, source_id) DO UPDATE SET
+					title = excluded.title,
+					content = excluded.content,
+					body = excluded.body,
+					author = excluded.author,
+					source_metadata = excluded.source_metadata,
+					updated_at = CURRENT_TIMESTAMP`,
+				integration.UserID, integration.WorkspaceID, models.SourceTypeSlack,
+				sourceID, msg.TS, title, msg.Text, msg.Text, authorName,
+				models.SignalStatusUnread, string(metadataJSON), time.Unix(msg.Timestamp, 0),
+			)
+			if err != nil {
+				log.Printf("Failed to upsert Slack signal: %v", err)
 			}
 		}
 
@@ -307,5 +323,37 @@ func (s *SyncService) ManualSync(integrationID int) error {
 		s.syncSlackIntegration(&integration, accessToken)
 	}
 
+	return nil
+}
+
+// SyncSlackSignals triggers a manual sync for Slack signals
+func SyncSlackSignals(userID, workspaceID int) error {
+	var integration models.ExternalIntegration
+	var encryptedToken string
+	err := database.DB.QueryRow(
+		`SELECT id, user_id, workspace_id, provider, access_token, metadata 
+		 FROM external_integrations 
+		 WHERE user_id = ? AND workspace_id = ? AND provider = 'slack'`,
+		userID, workspaceID,
+	).Scan(
+		&integration.ID, &integration.UserID, &integration.WorkspaceID,
+		&integration.Provider, &encryptedToken, &integration.Metadata,
+	)
+	if err != nil {
+		return err
+	}
+
+	encryptor, err := utils.NewTokenEncryptor()
+	if err != nil {
+		return err
+	}
+
+	accessToken, err := encryptor.Decrypt(encryptedToken)
+	if err != nil {
+		return err
+	}
+
+	s := NewSyncService(encryptor)
+	s.syncSlackIntegration(&integration, accessToken)
 	return nil
 }
