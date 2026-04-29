@@ -262,12 +262,17 @@ func GetGitHubClient(userID, workspaceID int) (*http.Client, error) {
 		return nil, fmt.Errorf("failed to decrypt token: %w", err)
 	}
 
-	// Create a token source
 	token := &oauth2.Token{
 		AccessToken: accessToken,
 	}
 
-	return oauth2.NewClient(context.Background(), oauth2.StaticTokenSource(token)), nil
+	// Pass a base HTTP client with a 30 s timeout so that every GitHub API
+	// call made through this client (repos, issues, comments …) is bounded.
+	// Without this, oauth2.NewClient uses http.DefaultClient which has no
+	// timeout and can hang indefinitely on a slow or rate-limited response.
+	baseClient := &http.Client{Timeout: 30 * time.Second}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, baseClient)
+	return oauth2.NewClient(ctx, oauth2.StaticTokenSource(token)), nil
 }
 
 // FetchAssignedIssues fetches issues assigned to the user
@@ -298,6 +303,9 @@ func FetchRepoIssues(userID, workspaceID int, repoFullName string) ([]GitHubIssu
 
 // fetchGitHubIssues fetches issues or PRs from GitHub API with pagination
 func fetchGitHubIssues(client *http.Client, endpoint string, params map[string]string) ([]GitHubIssue, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
 	var allIssues []GitHubIssue
 	page := 1
 	perPage := 100 // Max per page to reduce API calls
@@ -312,7 +320,7 @@ func fetchGitHubIssues(client *http.Client, endpoint string, params map[string]s
 		q.Set("per_page", strconv.Itoa(perPage))
 		u.RawQuery = q.Encode()
 
-		req, err := http.NewRequest("GET", u.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -625,6 +633,11 @@ func ListAccessibleRepos(userID, workspaceID int) ([]map[string]interface{}, err
 		return nil, err
 	}
 
+	// Overall deadline for the entire paginated fetch — prevents an infinite
+	// hang if GitHub is slow or returns an unexpectedly large number of pages.
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
 	var allRepos []map[string]interface{}
 	page := 1
 	perPage := 100
@@ -632,7 +645,7 @@ func ListAccessibleRepos(userID, workspaceID int) ([]map[string]interface{}, err
 	for {
 		u := fmt.Sprintf("https://api.github.com/user/repos?page=%d&per_page=%d", page, perPage)
 
-		req, err := http.NewRequest("GET", u, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 		if err != nil {
 			return nil, err
 		}

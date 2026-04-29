@@ -17,12 +17,23 @@ func InitDB() error {
 	return InitDBWithPath(strings.TrimSpace(os.Getenv("DATABASE_PATH")))
 }
 
+func buildDSN(path string) string {
+	// Embed SQLite pragmas in the DSN so they apply to every connection in the
+	// pool, not just the one used during initialisation.  Without this,
+	// busy_timeout only applies to the first connection; background goroutines
+	// that hold a write lock can block other connections indefinitely.
+	if strings.Contains(path, ":memory:") || strings.Contains(path, "?") {
+		return path // already has params, or in-memory test db – leave as-is
+	}
+	return path + "?_busy_timeout=5000&_journal_mode=wal&_foreign_keys=on"
+}
+
 func InitDBWithPath(path string) error {
 	if strings.TrimSpace(path) == "" {
 		path = defaultDBPath
 	}
 
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite3", buildDSN(path))
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
