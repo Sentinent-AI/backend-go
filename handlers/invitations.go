@@ -5,10 +5,14 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"sentinent-backend/database"
 	"sentinent-backend/middleware"
 	"sentinent-backend/models"
+	"sentinent-backend/services"
 	"sentinent-backend/utils"
 	"strconv"
 	"strings"
@@ -113,6 +117,31 @@ func CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	invitationID, _ := result.LastInsertId()
+
+	// Send invitation email — look up workspace name and inviter email for the message body.
+	go func() {
+		var workspaceName string
+		if err := database.DB.QueryRow("SELECT name FROM workspaces WHERE id = ?", workspaceID).Scan(&workspaceName); err != nil {
+			log.Printf("invitation email: could not fetch workspace name for workspace %d: %v", workspaceID, err)
+			return
+		}
+		var inviterEmail string
+		if err := database.DB.QueryRow("SELECT email FROM users WHERE id = ?", userID).Scan(&inviterEmail); err != nil {
+			log.Printf("invitation email: could not fetch inviter email for user %d: %v", userID, err)
+			return
+		}
+		baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("FRONTEND_BASE_URL")), "/")
+		if baseURL == "" {
+			baseURL = "http://localhost:4200"
+		}
+		acceptURL := fmt.Sprintf("%s/invitations/%s", baseURL, token)
+		if err := services.SendInvitationEmail(req.Email, workspaceName, inviterEmail, acceptURL); err != nil {
+			log.Printf("invitation email: failed to send to %s: %v", req.Email, err)
+		} else {
+			log.Printf("invitation email: sent to %s for workspace %d", req.Email, workspaceID)
+		}
+	}()
+
 	response := models.InvitationResponse{
 		ID:          int(invitationID),
 		WorkspaceID: workspaceID,

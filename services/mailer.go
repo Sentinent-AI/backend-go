@@ -49,6 +49,47 @@ func PasswordResetEmailDeliveryConfigured() bool {
 	return err == nil
 }
 
+func SendInvitationEmail(toEmail, workspaceName, invitedByEmail, acceptURL string) error {
+	config, err := LoadSMTPConfigFromEnv()
+	if err != nil {
+		return err
+	}
+
+	subject := fmt.Sprintf("You've been invited to join %s on Sentinent", workspaceName)
+	body := fmt.Sprintf(
+		"Hello,\r\n\r\n%s has invited you to join the workspace \"%s\" on Sentinent.\r\n\r\nAccept your invitation here:\r\n%s\r\n\r\nThis invitation expires in 7 days. If you weren't expecting this, you can safely ignore this email.\r\n",
+		invitedByEmail, workspaceName, acceptURL,
+	)
+
+	fromHeader := config.FromEmail
+	if config.FromName != "" {
+		fromHeader = (&mail.Address{Name: config.FromName, Address: config.FromEmail}).String()
+	}
+
+	message := strings.Join([]string{
+		"From: " + fromHeader,
+		"To: " + toEmail,
+		"Subject: " + subject,
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"",
+		body,
+	}, "\r\n")
+
+	var auth smtp.Auth
+	if config.Username != "" || config.Password != "" {
+		auth = smtp.PlainAuth("", config.Username, config.Password, config.Host)
+	}
+
+	return smtp.SendMail(
+		fmt.Sprintf("%s:%d", config.Host, config.Port),
+		auth,
+		config.FromEmail,
+		[]string{toEmail},
+		[]byte(message),
+	)
+}
+
 func SendPasswordResetEmail(toEmail, resetURL string) error {
 	config, err := LoadSMTPConfigFromEnv()
 	if err != nil {
