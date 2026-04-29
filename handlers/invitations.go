@@ -120,6 +120,12 @@ func CreateInvitation(w http.ResponseWriter, r *http.Request) {
 
 	// Send invitation email — look up workspace name and inviter email for the message body.
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("invitation email: goroutine panic (recovered): %v", r)
+			}
+		}()
+
 		var workspaceName string
 		if err := database.DB.QueryRow("SELECT name FROM workspaces WHERE id = ?", workspaceID).Scan(&workspaceName); err != nil {
 			log.Printf("invitation email: could not fetch workspace name for workspace %d: %v", workspaceID, err)
