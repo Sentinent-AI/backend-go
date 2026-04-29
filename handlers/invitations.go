@@ -280,6 +280,7 @@ func ValidateInvitation(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]interface{}{
 		"valid": true,
+		"email": invitation.Email,
 		"workspace": map[string]interface{}{
 			"id":   invitation.WorkspaceID,
 			"name": workspaceName,
