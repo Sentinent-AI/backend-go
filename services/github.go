@@ -733,10 +733,24 @@ func UpdateGitHubIssueState(userID, workspaceID int, repo string, number int, st
 		return fmt.Errorf("GitHub API error: %d - %s", resp.StatusCode, string(respBody))
 	}
 
-	// Update local signal state if it exists
+	// Update the state field inside source_metadata for the matching signal.
+	// The previous state is the opposite of the new one.
+	oldState := "closed"
+	if state == "closed" {
+		oldState = "open"
+	}
 	_, _ = database.DB.Exec(
-		`UPDATE signals SET status = ? WHERE user_id = ? AND workspace_id = ? AND source_type = 'github' AND source_metadata LIKE ?`,
-		state, userID, workspaceID, fmt.Sprintf("%%\"number\":%d%%", number),
+		`UPDATE signals
+		 SET source_metadata = replace(source_metadata, ?, ?),
+		     updated_at      = CURRENT_TIMESTAMP
+		 WHERE user_id       = ?
+		   AND workspace_id  = ?
+		   AND source_type   = 'github'
+		   AND source_metadata LIKE ?`,
+		fmt.Sprintf(`"state":"%s"`, oldState),
+		fmt.Sprintf(`"state":"%s"`, state),
+		userID, workspaceID,
+		fmt.Sprintf(`%%"number":%d%%`, number),
 	)
 
 	return nil
