@@ -192,11 +192,11 @@ func ListInvitations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := database.DB.Query(
-		`SELECT id, workspace_id, email, token, role, expires_at, created_by, created_at, updated_at
+		`SELECT id, workspace_id, email, token, role, expires_at, created_by, created_at, updated_at, accepted_at
 		 FROM invitations
-		 WHERE workspace_id = ? AND accepted_at IS NULL AND expires_at > ?
+		 WHERE workspace_id = ?
 		 ORDER BY created_at DESC`,
-		workspaceID, time.Now(),
+		workspaceID,
 	)
 	if err != nil {
 		http.Error(w, "Failed to fetch invitations", http.StatusInternalServerError)
@@ -217,6 +217,7 @@ func ListInvitations(w http.ResponseWriter, r *http.Request) {
 			&invitation.CreatedBy,
 			&invitation.CreatedAt,
 			&invitation.UpdatedAt,
+			&invitation.AcceptedAt,
 		); err != nil {
 			http.Error(w, "Failed to scan invitation", http.StatusInternalServerError)
 			return
@@ -434,6 +435,82 @@ func CancelInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+
+func ResendInvitation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, ok := middleware.GetUserID(r.Context())
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Path: /api/invitations/:token/resend  -> parts[2] = token
+	parts := splitPath(r.URL.Path)
+	if len(parts) < 3 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	token := parts[2]
+
+	var invitation models.Invitation
+	var createdBy int
+	err := database.DB.QueryRow(
+		`SELECT id, workspace_id, email, role, expires_at, created_by
+		 FROM invitations
+		 WHERE token = ? AND accepted_at IS NULL`,
+		token,
+	).Scan(&invitation.ID, &invitation.WorkspaceID, &invitation.Email, &invitation.Role, &invitation.ExpiresAt, &createdBy)
+	if err != nil {
+		http.Error(w, "Invalid or already accepted invitation", http.StatusNotFound)
+		return
+	}
+	if time.Now().After(invitation.ExpiresAt) {
+		http.Error(w, "Invitation has expired", http.StatusGone)
+		return
+	}
+
+	isOwner, err := middleware.IsWorkspaceOwner(userID, invitation.WorkspaceID)
+	if err != nil || !isOwner {
+		http.Error(w, "Forbidden: Only owners can resend invitations", http.StatusForbidden)
+		return
+	}
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("resend invitation email: goroutine panic (recovered): %v", r)
+			}
+		}()
+		var workspaceName string
+		if err := database.DB.QueryRow("SELECT name FROM workspaces WHERE id = ?", invitation.WorkspaceID).Scan(&workspaceName); err != nil {
+			log.Printf("resend invitation email: could not fetch workspace name: %v", err)
+			return
+		}
+		var inviterEmail string
+		if err := database.DB.QueryRow("SELECT email FROM users WHERE id = ?", userID).Scan(&inviterEmail); err != nil {
+			log.Printf("resend invitation email: could not fetch inviter email: %v", err)
+			return
+		}
+		baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("FRONTEND_BASE_URL")), "/")
+		if baseURL == "" {
+			baseURL = "http://localhost:4200"
+		}
+		acceptURL := fmt.Sprintf("%s/invitations/%s", baseURL, token)
+		if err := services.SendInvitationEmail(invitation.Email, workspaceName, inviterEmail, acceptURL); err != nil {
+			log.Printf("resend invitation email: failed to send to %s: %v", invitation.Email, err)
+		} else {
+			log.Printf("resend invitation email: sent to %s for workspace %d", invitation.Email, invitation.WorkspaceID)
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "sent"})
 }
 
 func generateSecureToken() (string, error) {
