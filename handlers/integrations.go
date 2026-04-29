@@ -138,7 +138,7 @@ func SlackAuth(w http.ResponseWriter, r *http.Request) {
 	redirectURI := getSlackRedirectURI(r)
 	authURL := "https://slack.com/oauth/v2/authorize?" +
 		"client_id=" + slackClientID +
-		"&scope=channels:history,channels:read,chat:write,users:read,groups:read,im:history,groups:history" +
+		"&scope=channels:history,channels:read,chat:write,users:read,groups:read,im:history,groups:history,channels:join" +
 		"&redirect_uri=" + redirectURI +
 		"&state=" + state
 

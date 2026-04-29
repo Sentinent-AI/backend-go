@@ -187,7 +187,11 @@ func (s *SyncService) syncSlackIntegration(integration *models.ExternalIntegrati
 
 	// Fetch messages from each channel
 	for _, channelID := range channels {
-		messages, rateLimit, err := s.slackClient.GetMessages(accessToken, channelID, 100, fmt.Sprintf("%.6f", lastSync))
+		var oldest string
+		if lastSync > 0 {
+			oldest = fmt.Sprintf("%.6f", lastSync)
+		}
+		messages, rateLimit, err := s.slackClient.GetMessages(accessToken, channelID, 100, oldest)
 		if err != nil {
 			if rateLimit != nil && rateLimit.IsRateLimited() {
 				log.Printf("Rate limited by Slack API, waiting %v", rateLimit.WaitDuration())

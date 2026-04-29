@@ -20,9 +20,14 @@ const (
 	SlackAPIBaseURL = "https://slack.com/api"
 )
 
+// HTTPDoer abstracts the HTTP client for testability.
+type HTTPDoer interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
 // SlackClient handles interactions with the Slack API
 type SlackClient struct {
-	HTTPClient *http.Client
+	HTTPClient HTTPDoer
 	BaseURL    string
 }
 
