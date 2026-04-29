@@ -144,7 +144,7 @@ func TestSlackClient_GetMessages_ReturnsMessages(t *testing.T) {
 					t.Errorf("expected channel=C123")
 				}
 				return newMockResponse(200, map[string]interface{}{
-					"ok":       true,
+					"ok": true,
 					"messages": []map[string]interface{}{
 						{"type": "message", "user": "U1", "text": "hello", "ts": "1234567890.123"},
 						{"type": "message", "user": "U2", "text": "world", "ts": "1234567891.456"},
@@ -432,8 +432,8 @@ func TestExchangeCodeForToken_Success(t *testing.T) {
 				}
 				return newMockResponse(200, map[string]interface{}{
 					"ok":           true,
-					"access_token":  "xoxb-test-token",
-					"token_type":    "Bearer",
+					"access_token": "xoxb-test-token",
+					"token_type":   "Bearer",
 					"scope":        "channels:read,channels:history",
 					"bot_user_id":  "B123",
 					"app_id":       "A123",
@@ -563,25 +563,25 @@ func TestIsSlackAPIError_Helper(t *testing.T) {
 	}{
 		{
 			name:     "matching code",
-			err:       &SlackAPIError{Code: "invalid_auth"},
+			err:      &SlackAPIError{Code: "invalid_auth"},
 			code:     "invalid_auth",
 			expected: true,
 		},
 		{
 			name:     "non-matching code",
-			err:       &SlackAPIError{Code: "invalid_auth"},
+			err:      &SlackAPIError{Code: "invalid_auth"},
 			code:     "channel_not_found",
 			expected: false,
 		},
 		{
 			name:     "non-SlackAPIError",
-			err:       errors.New("some other error"),
+			err:      errors.New("some other error"),
 			code:     "invalid_auth",
 			expected: false,
 		},
 		{
 			name:     "nil error",
-			err:       nil,
+			err:      nil,
 			code:     "invalid_auth",
 			expected: false,
 		},
