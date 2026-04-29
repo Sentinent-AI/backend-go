@@ -211,6 +211,7 @@ func TestSyncAllIntegrationsUpdatesSlackMetadata(t *testing.T) {
 	service := NewSyncService(encryptor)
 	service.slackClient = &mockSlackSyncClient{
 		channels: []SlackChannel{{ID: "C123", Name: "general"}},
+		messages: []SlackMessage{{Type: "message", User: "U1", Text: "Hello", TS: "1710000000.000100"}},
 	}
 
 	service.syncAllIntegrations()
@@ -276,8 +277,8 @@ func TestSyncSlackIntegrationSkipsNotInChannelErrors(t *testing.T) {
 	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
 		t.Fatalf("failed to unmarshal metadata: %v", err)
 	}
-	if _, ok := metadata["last_sync"]; !ok {
-		t.Fatalf("expected last_sync after skipping inaccessible channel, got %s", metadataJSON)
+	if _, ok := metadata["last_sync"]; ok {
+		t.Fatalf("expected last_sync NOT to be updated after skipping inaccessible channel, got %s", metadataJSON)
 	}
 	if !IsSlackAPIError(service.slackClient.(*mockSlackSyncClient).msgErr, "not_in_channel") {
 		t.Fatal("expected not_in_channel to be recognized as a Slack API error")
