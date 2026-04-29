@@ -25,6 +25,7 @@ func setupCollaborationTestDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open db: %v", err)
 	}
+	database.DB.SetMaxOpenConns(1)
 
 	statements := []string{
 		`CREATE TABLE users (
@@ -179,6 +180,13 @@ func TestInvitationLifecycle(t *testing.T) {
 	if validateRR.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", validateRR.Code, validateRR.Body.String())
 	}
+	var validation map[string]interface{}
+	if err := json.Unmarshal(validateRR.Body.Bytes(), &validation); err != nil {
+		t.Fatalf("failed to parse validation response: %v", err)
+	}
+	if validation["email"] != "invitee@example.com" {
+		t.Fatalf("expected validation response to include invited email, got %#v", validation["email"])
+	}
 
 	acceptReq := requestWithUser(http.MethodPost, "/api/invitations/"+token+"/accept", nil, 2, "invitee@example.com")
 	acceptRR := httptest.NewRecorder()
@@ -215,6 +223,7 @@ func TestListAndCancelInvitation(t *testing.T) {
 	seedWorkspaceCollaborationData(t)
 
 	expiresAt := time.Now().Add(24 * time.Hour)
+	acceptedAt := time.Now().Add(-time.Hour)
 	result, err := database.DB.Exec(
 		`INSERT INTO invitations (workspace_id, email, token, role, expires_at, created_by)
 		 VALUES (10, 'invitee@example.com', 'token-1', 'member', ?, 1)`,
@@ -224,6 +233,14 @@ func TestListAndCancelInvitation(t *testing.T) {
 		t.Fatalf("failed to seed invitation: %v", err)
 	}
 	invitationID, _ := result.LastInsertId()
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO invitations (workspace_id, email, token, role, expires_at, created_by, accepted_at, accepted_by)
+		 VALUES (10, 'joined@example.com', 'token-accepted', 'viewer', ?, 1, ?, 2)`,
+		expiresAt, acceptedAt,
+	); err != nil {
+		t.Fatalf("failed to seed accepted invitation: %v", err)
+	}
 
 	listReq := requestWithUser(http.MethodGet, "/api/workspaces/10/invitations", nil, 1, "owner@example.com")
 	listRR := httptest.NewRecorder()
@@ -237,8 +254,17 @@ func TestListAndCancelInvitation(t *testing.T) {
 	if err := json.Unmarshal(listRR.Body.Bytes(), &invitations); err != nil {
 		t.Fatalf("failed to parse response: %v", err)
 	}
-	if len(invitations) != 1 {
-		t.Fatalf("expected 1 invitation, got %d", len(invitations))
+	if len(invitations) != 2 {
+		t.Fatalf("expected pending and accepted invitations, got %d", len(invitations))
+	}
+	var sawAccepted bool
+	for _, invitation := range invitations {
+		if invitation.Email == "joined@example.com" {
+			sawAccepted = invitation.AcceptedAt != nil
+		}
+	}
+	if !sawAccepted {
+		t.Fatal("expected list response to include accepted invitation with accepted_at")
 	}
 
 	cancelReq := requestWithUser(http.MethodDelete, "/api/invitations/"+strconvFormatInt(invitationID), nil, 1, "owner@example.com")
@@ -255,6 +281,56 @@ func TestListAndCancelInvitation(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected invitation to be deleted, got count=%d", count)
+	}
+}
+
+func TestResendInvitationAllowsOwnerForPendingInvite(t *testing.T) {
+	setupCollaborationTestDB(t)
+	seedWorkspaceCollaborationData(t)
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO invitations (workspace_id, email, token, role, expires_at, created_by)
+		 VALUES (10, 'invitee@example.com', 'token-resend', 'member', ?, 1)`,
+		time.Now().Add(24*time.Hour),
+	); err != nil {
+		t.Fatalf("failed to seed invitation: %v", err)
+	}
+
+	req := requestWithUser(http.MethodPost, "/api/invitations/token-resend/resend", nil, 1, "owner@example.com")
+	rr := httptest.NewRecorder()
+	ResendInvitation(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to parse resend response: %v", err)
+	}
+	if response["status"] != "sent" {
+		t.Fatalf("expected sent status, got %#v", response)
+	}
+}
+
+func TestResendInvitationRejectsAcceptedInvite(t *testing.T) {
+	setupCollaborationTestDB(t)
+	seedWorkspaceCollaborationData(t)
+
+	if _, err := database.DB.Exec(
+		`INSERT INTO invitations (workspace_id, email, token, role, expires_at, created_by, accepted_at, accepted_by)
+		 VALUES (10, 'invitee@example.com', 'token-accepted', 'member', ?, 1, ?, 2)`,
+		time.Now().Add(24*time.Hour), time.Now(),
+	); err != nil {
+		t.Fatalf("failed to seed accepted invitation: %v", err)
+	}
+
+	req := requestWithUser(http.MethodPost, "/api/invitations/token-accepted/resend", nil, 1, "owner@example.com")
+	rr := httptest.NewRecorder()
+	ResendInvitation(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for accepted invite resend, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 

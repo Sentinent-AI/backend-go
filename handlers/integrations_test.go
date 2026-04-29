@@ -68,6 +68,9 @@ func TestSlackAuthHandlerSetsSignedState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse auth URL: %v", err)
 	}
+	if !strings.Contains(authURL.Query().Get("scope"), "channels:join") {
+		t.Fatalf("expected Slack auth scope to include channels:join, got %q", authURL.Query().Get("scope"))
+	}
 
 	userID, workspaceID, err := validateSlackOAuthState(authURL.Query().Get("state"))
 	if err != nil {
